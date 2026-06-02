@@ -326,6 +326,29 @@ function generateDuty() {
     SpreadsheetApp.getUi().alert('간호사 목록이 비어있습니다. [설정] 시트를 확인하세요.');
     return;
   }
+
+  // ── 표에 직접 입력해둔 칸 읽기 (부분 입력=고정, 빈칸만 채움) ──
+  // 일부만 채워져 있으면 "입력 유지 모드"(찍은 칸 고정), 비었거나 꽉 찼으면 "새 배정 모드"
+  var preset = null, presetCount = 0;
+  var ss0 = SpreadsheetApp.getActiveSpreadsheet();
+  var d0 = ss0.getSheetByName(DUTY_SHEET);
+  if (d0) {
+    try {
+      var cur = d0.getRange(DUTY_DATA_START_ROW, 2, cfg.nurses.length, cfg.numDays).getValues();
+      var filled = 0, empty = 0, tmp = [];
+      for (var pi = 0; pi < cfg.nurses.length; pi++) {
+        tmp[pi] = {};
+        for (var pj = 0; pj < cfg.numDays; pj++) {
+          var v = (cur[pi][pj] || '').toString().trim().toUpperCase();
+          if (v === 'D' || v === 'E' || v === 'N' || v === 'O') { tmp[pi][pj + 1] = v; filled++; }
+          else empty++;
+        }
+      }
+      if (filled > 0 && empty > 0) { preset = tmp; presetCount = filled; } // 부분 입력 → 고정
+    } catch (e) { preset = null; }
+  }
+  cfg.preset = preset; // tryBuild / isLocked 가 참고
+
   drawDutyTemplate();
 
   // 실행할 때마다 다른 배치가 나오도록 랜덤 베이스 시드 (재굴리기 가능)
@@ -343,8 +366,9 @@ function generateDuty() {
   checkRules(); // 생성 직후 자동 검사
 
   var sc = best.score;
+  var presetMsg = preset ? ('입력 ' + presetCount + '칸 고정 + ') : '';
   SpreadsheetApp.getActiveSpreadsheet().toast(
-    '자동 배정 완료 (미충족 ' + sc.unfilled + ' / 오프편차 ' + sc.offDev +
+    presetMsg + '자동 배정 완료 (미충족 ' + sc.unfilled + ' / 오프편차 ' + sc.offDev +
     ' / 나이트편차 ' + sc.nightDev + ' / 위반 ' + sc.hard + ')',
     '듀티표', 6);
 }
@@ -370,6 +394,13 @@ function tryBuild(cfg, rng) {
     for (var od in nu.reqOff) {
       var oi = parseInt(od, 10);
       if (oi >= 1 && oi <= nd && !sched[i2][oi]) sched[i2][oi] = SHIFT.O;
+    }
+    // 표에 직접 입력해둔 칸(preset)도 고정
+    if (cfg.preset && cfg.preset[i2]) {
+      for (var pd in cfg.preset[i2]) {
+        var pdi = parseInt(pd, 10);
+        if (pdi >= 1 && pdi <= nd) sched[i2][pdi] = cfg.preset[i2][pd];
+      }
     }
   }
 
@@ -503,7 +534,10 @@ function countOffRow(sched, i, nd) {
 /* (i, day)가 사용자가 요청한 칸(요청오프/요청근무)인지 → 보정에서 건드리지 않도록 */
 function isLocked(cfg, i, day) {
   var nu = cfg.nurses[i];
-  return !!(nu.reqOff && nu.reqOff[day]) || !!(nu.reqWork && nu.reqWork[day]);
+  if (nu.reqOff && nu.reqOff[day]) return true;
+  if (nu.reqWork && nu.reqWork[day]) return true;
+  if (cfg.preset && cfg.preset[i] && cfg.preset[i][day]) return true; // 표에 직접 입력한 칸
+  return false;
 }
 
 /* 보정 패스에서 채울 근무 선택: E는 하루 maxEvening(기본 3)까지만, 넘으면 D */
@@ -580,6 +614,7 @@ function assignNights(cfg, sched, rng) {
     var nu = cfg.nurses[i];
     if ((nu.reqOff && Object.keys(nu.reqOff).length) || (nu.reqWork && Object.keys(nu.reqWork).length)) { hasReq = true; break; }
   }
+  if (cfg.preset) hasReq = true; // 표에 직접 입력한 칸이 있으면 유연 모드(고정 존중)
   if (!hasReq && cfg.need.N === 2 && constructNights(cfg, sched, rng)) return; // 정확 구성 성공
   assignNightsGreedy(cfg, sched, rng); // 폴백
 }
