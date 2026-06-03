@@ -187,9 +187,6 @@ function readSettings() {
     var role = (vals[i][1] || '액팅').toString().trim();
     var prevNightDays = Number(vals[i][4]) || 0;
     var reqOff = parseReqOff(vals[i][2]);
-    // 첫 요청오프(가장 빠른 날)의 전날 → 가능하면 Day로 고정 (없거나 1일이면 0=미적용)
-    var firstOff = minDayKey(reqOff);
-    var dayBeforeFirstOff = (firstOff > 1) ? firstOff - 1 : 0;
     nurses.push({
       name: name,
       charge: role === '차지',
@@ -198,8 +195,8 @@ function readSettings() {
       prevNightDays: prevNightDays,
       prevBlocks: Math.round(prevNightDays / (cfg.nightLen || 3)),
       prefShift: parsePref(vals[i][5]), // 선호 듀티 (소프트): '' / 'D' / 'E' / 'N'
-      prefStrength: parsePrefStrength(vals[i][6]), // 강도: 1(약간)/2(보통)/3(강하게)
-      dayBeforeFirstOff: dayBeforeFirstOff // 첫 요청오프 전날(Day 고정 후보)
+      prefStrength: parsePrefStrength(vals[i][6]) // 강도: 1(약간)/2(보통)/3(강하게)
+      // 첫 요청오프 전날 Day 고정은 tryBuild 0-b에서 요청오프+수기입력(O)을 합쳐 계산
     });
   }
   cfg.nurses = nurses;
@@ -613,10 +610,19 @@ function tryBuild(cfg, rng) {
   cfg.nightOffLock = [];
 
   // 0-b) 첫 요청오프 전날 → 가능하면 Day로 고정 (요청·preset 다 놓인 뒤, "가능할 때만")
+  //      "첫 요청오프" = 설정 시트의 요청오프 + 표에 수기로 입력한 O 중 가장 빠른 날.
   //      조건: 빈칸 + 하드규칙 OK(canWork) + 그날 Day가 아직 필요인원 미만(초과 안 시킴)
   cfg.forcedDay = [];
   for (var fi = 0; fi < N; fi++) {
-    var fb = cfg.nurses[fi].dayBeforeFirstOff;
+    var firstOff = minDayKey(cfg.nurses[fi].reqOff);
+    if (cfg.preset && cfg.preset[fi]) { // 표에 직접 친 O(수기 리퀘스트)도 포함
+      for (var pok in cfg.preset[fi]) {
+        if (cfg.preset[fi][pok] !== 'O') continue;
+        var pod = parseInt(pok, 10);
+        if (pod >= 1 && (firstOff === 0 || pod < firstOff)) firstOff = pod;
+      }
+    }
+    var fb = (firstOff > 1) ? firstOff - 1 : 0;
     if (fb >= 1 && fb <= nd && !sched[fi][fb] &&
         countShift(sched, fb, 'D') < cfg.need.D &&
         canWork(cfg, sched, fi, fb, 'D')) {
