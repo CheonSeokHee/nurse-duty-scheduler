@@ -17,6 +17,7 @@
  *  - 선호 듀티(소프트): 간호사별로 Day/Evening/Night 선호 + 강도(약간/보통/강하게)를
  *    넣으면 되도록 그쪽으로 배정 (하드 규칙 아님 — 하루 필요인원 맞추는 선에서 최대 반영)
  *  - 첫 요청오프 전날 = 가능하면 Day로 고정 (그날 D 초과/하드규칙 위반이면 건너뜀)
+ *  - 첫 요청오프 다음날 = 무조건 나이트 (D-O-N 패턴; 그 칸에 직접 입력이 있으면 입력 존중)
  */
 
 /* ===================== 상수 ===================== */
@@ -609,10 +610,14 @@ function tryBuild(cfg, rng) {
   // 나이트 전후 필수오프 잠금맵 초기화 (placeNight/constructNights가 채움 → 보정이 못 건드림)
   cfg.nightOffLock = [];
 
-  // 0-b) 첫 요청오프 전날 → 가능하면 Day로 고정 (요청·preset 다 놓인 뒤, "가능할 때만")
-  //      "첫 요청오프" = 설정 시트의 요청오프 + 표에 수기로 입력한 O 중 가장 빠른 날.
-  //      조건: 빈칸 + 하드규칙 OK(canWork) + 그날 Day가 아직 필요인원 미만(초과 안 시킴)
+  // 0-b) 첫 리퀘스트 오프 전날 = Day(가능할 때만) / 다음날 = 나이트(무조건) → D-O-N 패턴
+  //      "첫 리퀘스트 오프" = 설정 시트의 요청오프 + 표에 수기로 입력한 O 중 가장 빠른 날.
+  //      · 전날 Day: 빈칸 + 하드규칙 OK + 그날 Day 필요인원 미만일 때만 (충돌 시 건너뜀)
+  //      · 다음날 N: 빈칸이면 무조건 고정 (사용자가 직접 친 칸만 존중).
+  //        정확 타일링은 이 N과 일치하는 배치만 채택하므로 자연스럽게 나이트 블록이 이어짐
   cfg.forcedDay = [];
+  cfg.forcedNight = [];
+  cfg.anchorNext = []; // 첫 리퀘스트 오프 "다음날" (나이트 앵커)
   for (var fi = 0; fi < N; fi++) {
     var firstOff = minDayKey(cfg.nurses[fi].reqOff);
     if (cfg.preset && cfg.preset[fi]) { // 표에 직접 친 O(수기 리퀘스트)도 포함
@@ -622,6 +627,7 @@ function tryBuild(cfg, rng) {
         if (pod >= 1 && (firstOff === 0 || pod < firstOff)) firstOff = pod;
       }
     }
+    // 전날 Day (가능할 때만)
     var fb = (firstOff > 1) ? firstOff - 1 : 0;
     if (fb >= 1 && fb <= nd && !sched[fi][fb] &&
         countShift(sched, fb, 'D') < cfg.need.D &&
@@ -629,10 +635,18 @@ function tryBuild(cfg, rng) {
       sched[fi][fb] = SHIFT.D;
       cfg.forcedDay[fi] = fb; // isLocked가 보호 → 보정 단계에서 안 바뀜
     }
+    // 다음날 나이트는 여기서 미리 박지 않는다 — 미리 박으면 정확 타일링이 거의 다 기각돼
+    // 표 품질이 무너짐. 대신 "앵커"로 등록해두고, 나이트 배정 후 같은 역할끼리
+    // 블록 스왑으로 그 자리에 맞춘다(enforceFirstOffNight). 점수에도 미준수 벌점.
+    var na = (firstOff >= 1) ? firstOff + 1 : 0;
+    if (na >= 1 && na <= nd && !sched[fi][na]) cfg.anchorNext[fi] = na;
   }
 
   // 1) 나이트 블록 배정
   assignNights(cfg, sched, rng);
+
+  // 1-b) 첫 리퀘스트 오프 다음날 = 나이트 강제 (같은 역할 블록 스왑 → 구성·인원 유지)
+  enforceFirstOffNight(cfg, sched);
 
   // 2) Day / Evening 배정 (차지 커버리지 우선)
   for (var day3 = 1; day3 <= nd; day3++) {
@@ -768,6 +782,152 @@ function lockNightOff(cfg, i, day) {
   cfg.nightOffLock[i][day] = true;
 }
 
+/* i의 나이트 블록 목록 [{s,e,len}] */
+function nightBlocksOf(cfg, sched, i) {
+  var nd = cfg.numDays, out = [];
+  for (var d = 1; d <= nd; d++) {
+    if (sched[i][d] === 'N' && sched[i][d - 1] !== 'N') {
+      var len = 0; while (sched[i][d + len] === 'N') len++;
+      out.push({ s: d, e: d + len - 1, len: len });
+    }
+  }
+  return out;
+}
+
+/* i의 자동 나이트오프(잠금)를 걷어내고 현재 블록 기준으로 다시 깐다 (블록 이동 후 정리용) */
+function rebuildNightOffs(cfg, sched, i) {
+  var nd = cfg.numDays, nu = cfg.nurses[i];
+  if (cfg.nightOffLock && cfg.nightOffLock[i]) {
+    for (var k in cfg.nightOffLock[i]) {
+      var d0 = parseInt(k, 10);
+      var userOwn = (nu.reqOff && nu.reqOff[d0]) || (cfg.preset && cfg.preset[i] && cfg.preset[i][d0]);
+      if (sched[i][d0] === 'O' && !userOwn) sched[i][d0] = '';
+    }
+    cfg.nightOffLock[i] = {};
+  }
+  var bs = nightBlocksOf(cfg, sched, i);
+  for (var b = 0; b < bs.length; b++) {
+    var obn = (bs[b].len >= cfg.nightLen) ? cfg.offBeforeNight : 0;
+    for (var x = 1; x <= obn; x++) {
+      var bd = bs[b].s - x;
+      if (bd >= 1 && !sched[i][bd]) sched[i][bd] = SHIFT.O;
+      if (bd >= 1 && sched[i][bd] === SHIFT.O) lockNightOff(cfg, i, bd);
+    }
+    var oan = offAfterFor(cfg, bs[b].len);
+    for (var y = 1; y <= oan; y++) {
+      var ad = bs[b].e + y;
+      if (ad <= nd && !sched[i][ad]) sched[i][ad] = SHIFT.O;
+      if (ad <= nd && sched[i][ad] === SHIFT.O) lockNightOff(cfg, i, ad);
+    }
+  }
+}
+
+/* i가 [s,e] 나이트 블록을 새로 가질 수 있는가 (칸 비었나 + 전후 오프 가능 + 기존 블록과 간격) */
+function canHostNightBlock(cfg, sched, i, s, e) {
+  var nd = cfg.numDays, len = e - s + 1;
+  if (s < 1 || e > nd || len < 1 || len > cfg.nightLen) return false;
+  for (var d = s; d <= e; d++) if (sched[i][d] !== '') return false;
+  var obn = (len >= cfg.nightLen) ? cfg.offBeforeNight : 0;
+  for (var b = 1; b <= obn; b++) {
+    var bd = s - b;
+    if (bd >= 1) { var v = sched[i][bd]; if (v === 'D' || v === 'E' || v === 'N') return false; }
+  }
+  var oan = offAfterFor(cfg, len);
+  for (var a = 1; a <= oan; a++) {
+    var ad = e + a;
+    if (ad <= nd) { var v2 = sched[i][ad]; if (v2 === 'D' || v2 === 'E' || v2 === 'N') return false; }
+  }
+  // 기존 블록들과의 간격 (붙으면 병합돼 길이 초과 위험 → 금지)
+  var bs = nightBlocksOf(cfg, sched, i);
+  for (var k = 0; k < bs.length; k++) {
+    var ob = bs[k];
+    if (ob.e >= s - 1 && ob.s <= e + 1) return false; // 겹침/인접
+    var gap, need;
+    if (ob.e < s) { gap = s - ob.e - 1; need = Math.max(offAfterFor(cfg, ob.len), obn); }
+    else { gap = ob.s - e - 1; need = Math.max(oan, (ob.len >= cfg.nightLen) ? cfg.offBeforeNight : 0); }
+    if (gap < need) return false;
+  }
+  // 연속근무: 앞 오프가 없는 짧은 블록은 앞 근무 연속과 합산 검사
+  if (obn === 0) {
+    var back = 0;
+    for (var d2 = s - 1; d2 >= 1; d2--) { var v3 = sched[i][d2]; if (v3 === 'D' || v3 === 'E') back++; else break; }
+    if (back + len > cfg.maxConsec) return false;
+  }
+  return true;
+}
+
+/* 첫 리퀘스트 오프 다음날(앵커)에 나이트가 오도록, 같은 역할의 그날 나이트 블록을 스왑.
+   X(앵커 주인)가 그날 N 소유자 Y의 블록 꼬리[a..e1]를 가져오고(역할 동일 → 매일 구성 유지),
+   대신 X의 다른 블록 하나를 Y에게 넘겨 개수 균형을 맞춘다(없으면 불균형 허용 → 점수가 조정). */
+function enforceFirstOffNight(cfg, sched) {
+  var nd = cfg.numDays, N = cfg.nurses.length;
+  if (!cfg.anchorNext) return;
+  for (var X = 0; X < N; X++) {
+    var a = cfg.anchorNext[X];
+    if (!a || a > nd) continue;
+    if (sched[X][a] === 'N') continue;  // 이미 만족
+    if (sched[X][a] !== '') continue;   // 칸이 차 있으면(요청/오프 등) 존중
+    var role = cfg.nurses[X].charge;
+    // 그날 같은 역할의 N 소유자 Y 찾기
+    var Y = -1;
+    for (var i = 0; i < N; i++)
+      if (i !== X && cfg.nurses[i].charge === role && sched[i][a] === 'N') { Y = i; break; }
+    if (Y < 0) {
+      // 그날 같은 역할 나이트 없음(미달) → 인원 여유 있으면 X가 a부터 새 블록 생성
+      if (countShift(sched, a, 'N') < cfg.need.N) {
+        var lens = [3, 2, 1];
+        for (var li = 0; li < lens.length; li++) {
+          if (a + lens[li] - 1 <= nd && canHostNightBlock(cfg, sched, X, a, a + lens[li] - 1)) {
+            for (var dn = a; dn <= a + lens[li] - 1; dn++) sched[X][dn] = SHIFT.N;
+            rebuildNightOffs(cfg, sched, X);
+            cfg.forcedNight[X] = a;
+            break;
+          }
+        }
+      }
+      continue;
+    }
+    // Y의 블록(a 포함) — 사용자가 직접 친 N이면 못 건드림
+    var s1 = a; while (s1 > 1 && sched[Y][s1 - 1] === 'N') s1--;
+    var e1 = a; while (e1 < nd && sched[Y][e1 + 1] === 'N') e1++;
+    var locked = false;
+    for (var dch = s1; dch <= e1; dch++) if (isLocked(cfg, Y, dch)) { locked = true; break; }
+    if (locked) continue;
+    // X가 가져갈 부분 = [a..e1] (a 앞은 X의 요청오프라 못 가짐). Y는 [s1..a-1]을 유지.
+    // ① Y의 꼬리를 비우고 X가 가질 수 있는지 확인
+    for (var dc = a; dc <= e1; dc++) sched[Y][dc] = '';
+    rebuildNightOffs(cfg, sched, Y); // Y의 낡은 자동오프 정리(머리 블록 기준 재구성)
+    if (!canHostNightBlock(cfg, sched, X, a, e1)) {
+      // 롤백
+      for (var dr = a; dr <= e1; dr++) sched[Y][dr] = SHIFT.N;
+      rebuildNightOffs(cfg, sched, Y);
+      continue;
+    }
+    for (var dx = a; dx <= e1; dx++) sched[X][dx] = SHIFT.N;
+    rebuildNightOffs(cfg, sched, X);
+    cfg.forcedNight[X] = a;
+    // ② 개수 균형: X의 다른 블록 하나(앵커 블록 제외)를 Y에게 넘겨봄 (안 되면 불균형 허용)
+    var xb = nightBlocksOf(cfg, sched, X);
+    for (var bi = 0; bi < xb.length; bi++) {
+      var B2 = xb[bi];
+      if (B2.s <= a && a <= B2.e) continue; // 방금 만든 앵커 블록은 제외
+      var lockedX = false;
+      for (var dlx = B2.s; dlx <= B2.e; dlx++) if (isLocked(cfg, X, dlx)) { lockedX = true; break; }
+      if (lockedX) continue;
+      for (var dox = B2.s; dox <= B2.e; dox++) sched[X][dox] = '';
+      rebuildNightOffs(cfg, sched, X);
+      if (canHostNightBlock(cfg, sched, Y, B2.s, B2.e)) {
+        for (var dy = B2.s; dy <= B2.e; dy++) sched[Y][dy] = SHIFT.N;
+        rebuildNightOffs(cfg, sched, Y);
+        break;
+      }
+      // 못 넘기면 X에게 복구
+      for (var dxr = B2.s; dxr <= B2.e; dxr++) sched[X][dxr] = SHIFT.N;
+      rebuildNightOffs(cfg, sched, X);
+    }
+  }
+}
+
 /* (i, day)가 사용자가 요청한 칸(요청오프/요청근무)인지 → 보정에서 건드리지 않도록 */
 function isLocked(cfg, i, day) {
   var nu = cfg.nurses[i];
@@ -775,6 +935,7 @@ function isLocked(cfg, i, day) {
   if (nu.reqWork && nu.reqWork[day]) return true;
   if (cfg.preset && cfg.preset[i] && cfg.preset[i][day]) return true; // 표에 직접 입력한 칸
   if (cfg.forcedDay && cfg.forcedDay[i] === day) return true;          // 첫 요청오프 전날 Day 고정
+  if (cfg.forcedNight && cfg.forcedNight[i] === day) return true;      // 첫 요청오프 다음날 N 고정
   if (cfg.nightOffLock && cfg.nightOffLock[i] && cfg.nightOffLock[i][day]) return true; // 나이트 전후 필수오프
   return false;
 }
@@ -1441,11 +1602,19 @@ function evaluate(cfg, sched) {
   }
   // 액팅이 차지보다 나이트가 적으면(차지 최다 > 액팅 최소) 벌점 → 재굴리기 시 회피
   var roleViol = hasActing && minActingN < 1e9 ? Math.max(0, maxChargeN - minActingN) : 0;
+  // 첫 리퀘스트 오프 다음날 나이트(D-O-N) 미준수 — "무조건" 규칙이라 강한 벌점
+  var donMiss = 0;
+  if (cfg.anchorNext) {
+    for (var ai = 0; ai < N; ai++) {
+      var aDay = cfg.anchorNext[ai];
+      if (aDay && aDay <= nd && sched[ai][aDay] !== 'N') donMiss++;
+    }
+  }
   return {
     unfilled: unfilled, hard: hard, offDev: offDev, overStaff: overStaff, consecOffViol: consecOffViol,
-    nightDev: Math.round(nightDev), roleViol: roleViol, prefMiss: prefMiss,
+    nightDev: Math.round(nightDev), roleViol: roleViol, prefMiss: prefMiss, donMiss: donMiss,
     // 커버리지(unfilled/overStaff/hard)·오프는 큰 가중으로 절대 우선 → 선호(prefMiss)는 그 안에서만 best 선택을 좌우
-    total: unfilled * 100 + overStaff * 60 + hard * 80 + offDev * 30 + consecOffViol * 25 +
+    total: unfilled * 100 + overStaff * 60 + hard * 80 + offDev * 30 + consecOffViol * 25 + donMiss * 50 +
       nightDev * 6 + roleViol * 10 + prefMiss
   };
 }
