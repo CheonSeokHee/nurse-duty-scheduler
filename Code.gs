@@ -638,8 +638,13 @@ function tryBuild(cfg, rng) {
     // 다음날 나이트는 여기서 미리 박지 않는다 — 미리 박으면 정확 타일링이 거의 다 기각돼
     // 표 품질이 무너짐. 대신 "앵커"로 등록해두고, 나이트 배정 후 같은 역할끼리
     // 블록 스왑으로 그 자리에 맞춘다(enforceFirstOffNight). 점수에도 미준수 벌점.
-    var na = (firstOff >= 1) ? firstOff + 1 : 0;
-    if (na >= 1 && na <= nd && !sched[fi][na]) cfg.anchorNext[fi] = na;
+    // 오프를 연속으로 신청한 경우(예: 7,8) 묶음이 끝난 다음날(9일)이 앵커.
+    if (firstOff >= 1) {
+      var runEnd = firstOff;
+      while (runEnd + 1 <= nd && sched[fi][runEnd + 1] === 'O') runEnd++; // 이 시점 O는 전부 요청/수기 오프
+      var na = runEnd + 1;
+      if (na <= nd && !sched[fi][na]) cfg.anchorNext[fi] = na;
+    }
   }
 
   // 1) 나이트 블록 배정
@@ -1176,56 +1181,65 @@ function constructNights(cfg, sched, rng) {
   }
   var cCounts = allocByWeight(nightWeights(charges), nd);
   var aCounts = allocByWeight(nightWeights(actings), nd);
-  var co = tileNightRole(nd, charges, rng, cCounts), ao = tileNightRole(nd, actings, rng, aCounts);
-  if (!co || !ao) return false;
 
-  // ── 사전 충돌 검증: 요청오프/요청근무/수기입력/전날Day와 부딪히면 실패 → 그리디 폴백.
-  //    attempt마다 타일링이 달라지므로 요청이 적당하면 무충돌 타일링(=고품질 표)을 찾게 된다.
-  // ① 타일링이 N을 놓을 칸이 이미 다른 값으로 차 있으면 충돌
-  for (var dv = 1; dv <= nd; dv++) {
-    var v1 = sched[co[dv]][dv], v2 = sched[ao[dv]][dv];
-    if ((v1 !== '' && v1 !== 'N') || (v2 !== '' && v2 !== 'N')) return false;
-  }
-  // ② 기존 N칸(요청근무 N / 수기 N)이 타일링 소유자와 다르면 그날 N 인원 초과 → 충돌
-  for (var iv = 0; iv < N; iv++)
-    for (var dv2 = 1; dv2 <= nd; dv2++)
-      if (sched[iv][dv2] === 'N' && co[dv2] !== iv && ao[dv2] !== iv) return false;
-  // ③ 블록 전후 필수오프 자리가 이미 '근무'(D/E)면 충돌 — 가상 블록으로 미리 검사
-  var nightDaysOf = {};
-  for (var dv3 = 1; dv3 <= nd; dv3++) {
-    (nightDaysOf[co[dv3]] = nightDaysOf[co[dv3]] || {})[dv3] = true;
-    (nightDaysOf[ao[dv3]] = nightDaysOf[ao[dv3]] || {})[dv3] = true;
-  }
-  for (var pk in nightDaysOf) {
-    var pi = parseInt(pk, 10), days = nightDaysOf[pk];
-    var blocks = [];
-    for (var sd = 1; sd <= nd; sd++) {
-      if (!days[sd] || days[sd - 1]) continue; // 블록 시작만
-      var bl = 0; while (days[sd + bl]) bl++;
-      var be = sd + bl - 1;
-      blocks.push({ s: sd, e: be, len: bl });
-      var ob = (bl >= cfg.nightLen) ? cfg.offBeforeNight : 0;
-      for (var bb = 1; bb <= ob; bb++) {
-        var bd0 = sd - bb;
-        if (bd0 >= 1 && (sched[pi][bd0] === 'D' || sched[pi][bd0] === 'E')) return false;
+  // ── 사전 충돌 검증: 요청오프/요청근무/수기입력/전날Day와 부딪히면 그 타일링은 기각 ──
+  function tilingValid(co, ao) {
+    // ① 타일링이 N을 놓을 칸이 이미 다른 값으로 차 있으면 충돌
+    for (var dv = 1; dv <= nd; dv++) {
+      var v1 = sched[co[dv]][dv], v2 = sched[ao[dv]][dv];
+      if ((v1 !== '' && v1 !== 'N') || (v2 !== '' && v2 !== 'N')) return false;
+    }
+    // ② 기존 N칸(요청근무 N / 수기 N)이 타일링 소유자와 다르면 그날 N 인원 초과 → 충돌
+    for (var iv = 0; iv < N; iv++)
+      for (var dv2 = 1; dv2 <= nd; dv2++)
+        if (sched[iv][dv2] === 'N' && co[dv2] !== iv && ao[dv2] !== iv) return false;
+    // ③ 블록 전후 필수오프 자리가 이미 '근무'(D/E)면 충돌 — 가상 블록으로 미리 검사
+    var nightDaysOf = {};
+    for (var dv3 = 1; dv3 <= nd; dv3++) {
+      (nightDaysOf[co[dv3]] = nightDaysOf[co[dv3]] || {})[dv3] = true;
+      (nightDaysOf[ao[dv3]] = nightDaysOf[ao[dv3]] || {})[dv3] = true;
+    }
+    for (var pk in nightDaysOf) {
+      var pi = parseInt(pk, 10), days = nightDaysOf[pk];
+      var blocks = [];
+      for (var sd = 1; sd <= nd; sd++) {
+        if (!days[sd] || days[sd - 1]) continue; // 블록 시작만
+        var bl = 0; while (days[sd + bl]) bl++;
+        var be = sd + bl - 1;
+        blocks.push({ s: sd, e: be, len: bl });
+        var ob = (bl >= cfg.nightLen) ? cfg.offBeforeNight : 0;
+        for (var bb = 1; bb <= ob; bb++) {
+          var bd0 = sd - bb;
+          if (bd0 >= 1 && (sched[pi][bd0] === 'D' || sched[pi][bd0] === 'E')) return false;
+        }
+        var oa = offAfterFor(cfg, bl);
+        for (var aa = 1; aa <= oa; aa++) {
+          var ad0 = be + aa;
+          if (ad0 <= nd && (sched[pi][ad0] === 'D' || sched[pi][ad0] === 'E')) return false;
+        }
       }
-      var oa = offAfterFor(cfg, bl);
-      for (var aa = 1; aa <= oa; aa++) {
-        var ad0 = be + aa;
-        if (ad0 <= nd && (sched[pi][ad0] === 'D' || sched[pi][ad0] === 'E')) return false;
+      // ④ 같은 사람의 블록 사이 간격: 앞 블록 종료후 오프 + 뒷 블록(3연속) 시작전 오프 자리 필요
+      for (var bi2 = 1; bi2 < blocks.length; bi2++) {
+        var gap = blocks[bi2].s - blocks[bi2 - 1].e - 1;
+        var needGap = Math.max(
+          offAfterFor(cfg, blocks[bi2 - 1].len),
+          (blocks[bi2].len >= cfg.nightLen) ? cfg.offBeforeNight : 0
+        );
+        if (gap < needGap) return false;
       }
     }
-    // ④ 같은 사람의 블록 사이 간격: 앞 블록 종료후 오프 + 뒷 블록(3연속) 시작전 오프가 들어갈 만큼 필요
-    //    (예: 3연속 끝 → 2오프 필요인데 1일 뒤 다음 블록 시작이면 위반 → 이 타일링 기각)
-    for (var bi2 = 1; bi2 < blocks.length; bi2++) {
-      var gap = blocks[bi2].s - blocks[bi2 - 1].e - 1;
-      var needGap = Math.max(
-        offAfterFor(cfg, blocks[bi2 - 1].len),
-        (blocks[bi2].len >= cfg.nightLen) ? cfg.offBeforeNight : 0
-      );
-      if (gap < needGap) return false;
-    }
+    return true;
   }
+
+  // 요청/수기입력이 많은 달은 무충돌 타일링이 드물다 → attempt 안에서 여러 번 재추첨해
+  // 정확 구성(차지1+액팅1, 위반 0) 성공률을 끌어올린다. (요청 없으면 보통 1회에 통과)
+  var co = null, ao = null, found = false;
+  for (var retry = 0; retry < 30 && !found; retry++) {
+    co = tileNightRole(nd, charges, rng, cCounts);
+    ao = tileNightRole(nd, actings, rng, aCounts);
+    if (co && ao && tilingValid(co, ao)) found = true;
+  }
+  if (!found) return false;
 
   for (var d = 1; d <= nd; d++) { sched[co[d]][d] = SHIFT.N; sched[ao[d]][d] = SHIFT.N; }
   // 블록 전후 오프 (3연속만 앞 오프)
@@ -1372,20 +1386,21 @@ function pickWindowNurse(cfg, sched, start, end, winSize, thisNights, sizeCount,
   }
   if (!pool.length) return -1;
   pool.sort(function (a, b) {
+    // 0) 두 번째 자리(커버리지 외)는 "액팅 절대 우선" → 매일 밤 차지1+액팅1 구성 유지.
+    //    (이걸 부족분보다 아래에 두면, 선호 재분배로 차지 목표가 액팅보다 커질 때
+    //     차지가 또 뽑혀 차지2+액팅0 밤이 생긴다 — 실사용에서 발견된 버그)
+    if (!requireCharge) {
+      var ra = cfg.nurses[a].charge ? 1 : 0, rb = cfg.nurses[b].charge ? 1 : 0;
+      if (ra !== rb) return ra - rb;
+    }
     // 1) 목표 대비 부족분(deficit) 큰 사람 먼저 → 각자 목표치까지 채움
-    //    (선호는 nightTarget 자체에 이미 반영됨 — N선호=목표↑, D/E선호=목표↓.
-    //     여기서 선호로 또 정렬하면 블록 타일링이 깨져 커버리지에 빈칸이 생김)
+    //    (선호는 nightTarget 자체에 이미 반영됨 — N선호=목표↑, D/E선호=목표↓)
     var defa = nightTarget[a] - thisNights[a], defb = nightTarget[b] - thisNights[b];
     if (defa !== defb) return defb - defa;
     // 1-b) 같은 길이 블록을 두 번 안 하도록 → 2일+3일=5로 딱 떨어지게 (4·6 변동 방지)
     var sa = (sizeCount[a][winSize] || 0), sb = (sizeCount[b][winSize] || 0);
     if (sa !== sb) return sa - sb;
-    // 2) 커버리지 외(2번째) 자리는 액팅 우선 → 액팅이 목표까지 흡수, 차지는 나머지만
-    if (!requireCharge) {
-      var ra = cfg.nurses[a].charge ? 1 : 0, rb = cfg.nurses[b].charge ? 1 : 0;
-      if (ra !== rb) return ra - rb;
-    }
-    // 3) 전월 나이트 적은 사람 → 동률 랜덤 (캐리오버 공평)
+    // 2) 전월 나이트 적은 사람 → 동률 랜덤 (캐리오버 공평)
     var na = cfg.nurses[a].prevNightDays || 0, nb = cfg.nurses[b].prevNightDays || 0;
     if (na !== nb) return na - nb;
     return rng() - 0.5;
