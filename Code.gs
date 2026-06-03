@@ -922,16 +922,12 @@ function makesLongOff(cfg, sched, i) {
 }
 
 /* ── 나이트 배정 디스패처 ──
-   요청(요청오프/요청근무)이 없고 하루 2명 체제면 → "정확 구성"(전원 목표치 딱 맞춤)
-   요청이 있으면 → 그리디(요청 유연 처리, 나이트 ±1 변동 허용) */
+   하루 2명 체제면 우선 "정확 구성"(전원 목표치 딱 맞춤) 시도.
+   요청/수기입력이 있어도 시도한다 — constructNights가 충돌을 스스로 검증해서
+   충돌 없는 타일링이면 채택(고품질), 충돌하면 false → 그리디 폴백.
+   (300회 attempt마다 타일링이 달라지므로, 요청이 적당하면 무충돌 타일링을 찾게 됨) */
 function assignNights(cfg, sched, rng) {
-  var hasReq = false;
-  for (var i = 0; i < cfg.nurses.length; i++) {
-    var nu = cfg.nurses[i];
-    if ((nu.reqOff && Object.keys(nu.reqOff).length) || (nu.reqWork && Object.keys(nu.reqWork).length)) { hasReq = true; break; }
-  }
-  if (cfg.preset) hasReq = true; // 표에 직접 입력한 칸이 있으면 유연 모드(고정 존중)
-  if (!hasReq && cfg.need.N === 2 && constructNights(cfg, sched, rng)) return; // 정확 구성 성공
+  if (cfg.need.N === 2 && constructNights(cfg, sched, rng)) return; // 정확 구성 성공
   assignNightsGreedy(cfg, sched, rng); // 폴백
 }
 
@@ -1015,6 +1011,55 @@ function constructNights(cfg, sched, rng) {
   var aCounts = allocByWeight(nightWeights(actings), nd);
   var co = tileNightRole(nd, charges, rng, cCounts), ao = tileNightRole(nd, actings, rng, aCounts);
   if (!co || !ao) return false;
+
+  // ── 사전 충돌 검증: 요청오프/요청근무/수기입력/전날Day와 부딪히면 실패 → 그리디 폴백.
+  //    attempt마다 타일링이 달라지므로 요청이 적당하면 무충돌 타일링(=고품질 표)을 찾게 된다.
+  // ① 타일링이 N을 놓을 칸이 이미 다른 값으로 차 있으면 충돌
+  for (var dv = 1; dv <= nd; dv++) {
+    var v1 = sched[co[dv]][dv], v2 = sched[ao[dv]][dv];
+    if ((v1 !== '' && v1 !== 'N') || (v2 !== '' && v2 !== 'N')) return false;
+  }
+  // ② 기존 N칸(요청근무 N / 수기 N)이 타일링 소유자와 다르면 그날 N 인원 초과 → 충돌
+  for (var iv = 0; iv < N; iv++)
+    for (var dv2 = 1; dv2 <= nd; dv2++)
+      if (sched[iv][dv2] === 'N' && co[dv2] !== iv && ao[dv2] !== iv) return false;
+  // ③ 블록 전후 필수오프 자리가 이미 '근무'(D/E)면 충돌 — 가상 블록으로 미리 검사
+  var nightDaysOf = {};
+  for (var dv3 = 1; dv3 <= nd; dv3++) {
+    (nightDaysOf[co[dv3]] = nightDaysOf[co[dv3]] || {})[dv3] = true;
+    (nightDaysOf[ao[dv3]] = nightDaysOf[ao[dv3]] || {})[dv3] = true;
+  }
+  for (var pk in nightDaysOf) {
+    var pi = parseInt(pk, 10), days = nightDaysOf[pk];
+    var blocks = [];
+    for (var sd = 1; sd <= nd; sd++) {
+      if (!days[sd] || days[sd - 1]) continue; // 블록 시작만
+      var bl = 0; while (days[sd + bl]) bl++;
+      var be = sd + bl - 1;
+      blocks.push({ s: sd, e: be, len: bl });
+      var ob = (bl >= cfg.nightLen) ? cfg.offBeforeNight : 0;
+      for (var bb = 1; bb <= ob; bb++) {
+        var bd0 = sd - bb;
+        if (bd0 >= 1 && (sched[pi][bd0] === 'D' || sched[pi][bd0] === 'E')) return false;
+      }
+      var oa = offAfterFor(cfg, bl);
+      for (var aa = 1; aa <= oa; aa++) {
+        var ad0 = be + aa;
+        if (ad0 <= nd && (sched[pi][ad0] === 'D' || sched[pi][ad0] === 'E')) return false;
+      }
+    }
+    // ④ 같은 사람의 블록 사이 간격: 앞 블록 종료후 오프 + 뒷 블록(3연속) 시작전 오프가 들어갈 만큼 필요
+    //    (예: 3연속 끝 → 2오프 필요인데 1일 뒤 다음 블록 시작이면 위반 → 이 타일링 기각)
+    for (var bi2 = 1; bi2 < blocks.length; bi2++) {
+      var gap = blocks[bi2].s - blocks[bi2 - 1].e - 1;
+      var needGap = Math.max(
+        offAfterFor(cfg, blocks[bi2 - 1].len),
+        (blocks[bi2].len >= cfg.nightLen) ? cfg.offBeforeNight : 0
+      );
+      if (gap < needGap) return false;
+    }
+  }
+
   for (var d = 1; d <= nd; d++) { sched[co[d]][d] = SHIFT.N; sched[ao[d]][d] = SHIFT.N; }
   // 블록 전후 오프 (3연속만 앞 오프)
   for (var p = 0; p < N; p++) {
@@ -1356,13 +1401,19 @@ function evaluate(cfg, sched) {
   var avgNight = (cfg.need.N * nd) / N; // 1인 평균 나이트 일수
   var maxChargeN = 0, minActingN = 1e9, hasActing = false;
   var prefMiss = 0; // 선호 듀티 미반영도(선호 근무를 적게 할수록 ↑) — 적을수록 선호 잘 반영
+  var consecOffViol = 0; // 연속오프 한도(차지3/액팅2) 초과 — 탐색이 이런 배치를 피하게 함
   for (var i = 0; i < N; i++) {
     var off = 0, nights = 0, work = 0, matchPref = 0;
     var pref = cfg.nurses[i].prefShift;
+    var maxCO = cfg.nurses[i].charge ? (cfg.maxConsecOffCharge || 3) : (cfg.maxConsecOffActing || 2);
+    var offRun = 0;
     for (var d = 1; d <= nd; d++) {
       var v = sched[i][d];
-      if (v === 'O' || v === '') off++;
-      else { work++; if (v === 'N') nights++; if (pref && v === pref) matchPref++; }
+      if (v === 'O' || v === '') {
+        off++;
+        offRun++; if (offRun > maxCO) consecOffViol++;
+      }
+      else { work++; offRun = 0; if (v === 'N') nights++; if (pref && v === pref) matchPref++; }
     }
     if (off < cfg.offMin) offDev += (cfg.offMin - off);
     if (off > cfg.offMax) offDev += (off - cfg.offMax);
@@ -1385,9 +1436,11 @@ function evaluate(cfg, sched) {
   // 액팅이 차지보다 나이트가 적으면(차지 최다 > 액팅 최소) 벌점 → 재굴리기 시 회피
   var roleViol = hasActing && minActingN < 1e9 ? Math.max(0, maxChargeN - minActingN) : 0;
   return {
-    unfilled: unfilled, hard: hard, offDev: offDev, overStaff: overStaff, nightDev: Math.round(nightDev), roleViol: roleViol, prefMiss: prefMiss,
+    unfilled: unfilled, hard: hard, offDev: offDev, overStaff: overStaff, consecOffViol: consecOffViol,
+    nightDev: Math.round(nightDev), roleViol: roleViol, prefMiss: prefMiss,
     // 커버리지(unfilled/overStaff/hard)·오프는 큰 가중으로 절대 우선 → 선호(prefMiss)는 그 안에서만 best 선택을 좌우
-    total: unfilled * 100 + overStaff * 60 + hard * 80 + offDev * 30 + nightDev * 6 + roleViol * 10 + prefMiss
+    total: unfilled * 100 + overStaff * 60 + hard * 80 + offDev * 30 + consecOffViol * 25 +
+      nightDev * 6 + roleViol * 10 + prefMiss
   };
 }
 
