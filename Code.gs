@@ -31,6 +31,9 @@ var WORK_SHIFTS = ['D', 'E', 'N'];
 var PREF_DAY_SORT = true;                              // Day/Evening 채울 때 선호자 살짝 우선
 var NIGHT_STRENGTH_MAP = { 1: 1.25, 2: 1.5, 3: 1.9 };  // 약간/보통/강하게 → 나이트 목표 배율
 var PREFMISS_WEIGHT_MAP = { 1: 2, 2: 3, 3: 5 };        // 약간/보통/강하게 → 선호 반영 점수 가중
+// 선호 근무가 전체 근무일에서 차지하는 "목표 비율" — 100%로 극단화되지 않게 상한 역할.
+// 강하게여도 ~75%까지만 선호 근무, 나머지는 다른 듀티도 섞임 (예: 20근무 → 15일 선호 + 5일 기타)
+var PREF_TARGET_RATIO = { 1: 0.55, 2: 0.65, 3: 0.75 };
 
 var COLORS = {
   D: '#cfe2f3', // 연파랑
@@ -273,6 +276,22 @@ function nightWeightOf(nurse) {
 /* 선호 반영 점수(prefMiss) 1인당 가중 — 강할수록 best 선택에서 선호를 더 챙김 */
 function prefMissWeightOf(nurse) {
   return PREFMISS_WEIGHT_MAP[nurse.prefStrength] || 3;
+}
+
+/* 선호 근무 목표 일수 = 예상 근무일(nd-offMax) × 강도별 목표 비율
+   → 이 이상은 밀어붙이지 않음 (강하게여도 다른 듀티를 섞기 위한 상한) */
+function prefTargetCount(cfg, nurse) {
+  var ratio = PREF_TARGET_RATIO[nurse.prefStrength] || 0.65;
+  return Math.round((cfg.numDays - cfg.offMax) * ratio);
+}
+
+/* i가 선호 근무(D/E)를 이미 목표만큼 받았는지 → 도달했으면 선택에서 보통 사람 취급 */
+function prefSatisfied(cfg, sched, i) {
+  var nu = cfg.nurses[i];
+  if (nu.prefShift !== 'D' && nu.prefShift !== 'E') return false;
+  var c = 0;
+  for (var d = 1; d <= cfg.numDays; d++) if (sched[i][d] === nu.prefShift) c++;
+  return c >= prefTargetCount(cfg, nu);
 }
 
 /* ===================== 듀티표 템플릿 그리기 ===================== */
@@ -758,7 +777,8 @@ function isLocked(cfg, i, day) {
    단, 그 사람이 Day를 선호하면 D를 먼저 시도 */
 function chooseFillShift(cfg, sched, i, day) {
   var maxE = cfg.maxEvening || 3;
-  if (cfg.nurses[i].prefShift === 'D' && canWork(cfg, sched, i, day, 'D')) return 'D';
+  if (cfg.nurses[i].prefShift === 'D' && !prefSatisfied(cfg, sched, i) &&
+      canWork(cfg, sched, i, day, 'D')) return 'D';
   if (countShift(sched, day, 'E') < maxE && canWork(cfg, sched, i, day, 'E')) return 'E';
   if (canWork(cfg, sched, i, day, 'D')) return 'D';
   return '';
@@ -1236,11 +1256,18 @@ function pickDayCandidate(cfg, sched, day, shift, requireCharge, rng) {
   // 1순위: 전체 근무량 적은 사람(총 근무 고르게 = 오프 고르게, 커버리지 안정) →
   // 2순위: 선호 듀티(같은 근무량이면 그 근무 선호자 먼저) → 3순위: 랜덤.
   // 선호를 커버리지보다 위에 두면 빈칸(미충족)이 생기므로 일부러 2순위로 둠.
+  // 이미 선호 목표(prefTargetCount)에 도달한 사람은 보통 사람 취급 → 다른 듀티도 섞임.
+  var sat = {};
+  if (PREF_DAY_SORT && cfg.prefNudge !== false) {
+    for (var pi = 0; pi < pool.length; pi++)
+      if (prefSatisfied(cfg, sched, pool[pi])) sat[pool[pi]] = true;
+  }
   pool.sort(function (a, b) {
     var diff = fullWorkload(sched, a, cfg.numDays) - fullWorkload(sched, b, cfg.numDays);
     if (diff !== 0) return diff;
     if (PREF_DAY_SORT && cfg.prefNudge !== false) {
-      var pa = dayPrefRank(cfg.nurses[a], shift), pb = dayPrefRank(cfg.nurses[b], shift);
+      var pa = sat[a] ? 1 : dayPrefRank(cfg.nurses[a], shift);
+      var pb = sat[b] ? 1 : dayPrefRank(cfg.nurses[b], shift);
       if (pa !== pb) return pa - pb;
     }
     return rng() - 0.5;
@@ -1345,8 +1372,15 @@ function evaluate(cfg, sched) {
       if (cfg.nurses[i].charge) { if (nights > maxChargeN) maxChargeN = nights; }
       else { hasActing = true; if (nights < minActingN) minActingN = nights; }
     }
-    // 선호 듀티: 일하는 날 중 선호 근무가 아닌 날 수 × 강도가중 → 적을수록·강할수록 선호 반영
-    if (pref) prefMiss += (work - matchPref) * prefMissWeightOf(cfg.nurses[i]);
+    // 선호 듀티(D/E): 목표 일수에 "맞추기" — 모자라도, 너무 넘쳐도(100% 쏠림) 벌점
+    // → 강하게여도 목표(~75%)까지만 몰아주고 나머지는 다른 듀티를 섞음
+    if (pref === 'D' || pref === 'E') {
+      var tgt = Math.min(prefTargetCount(cfg, cfg.nurses[i]), work);
+      prefMiss += Math.abs(tgt - matchPref) * prefMissWeightOf(cfg.nurses[i]);
+    } else if (pref === 'N') {
+      // 나이트 선호는 구조적 상한(타일링 목표)이 있어 극단화 위험 없음 → 많을수록 가점 유지
+      prefMiss += (work - matchPref) * prefMissWeightOf(cfg.nurses[i]);
+    }
   }
   // 액팅이 차지보다 나이트가 적으면(차지 최다 > 액팅 최소) 벌점 → 재굴리기 시 회피
   var roleViol = hasActing && minActingN < 1e9 ? Math.max(0, maxChargeN - minActingN) : 0;
