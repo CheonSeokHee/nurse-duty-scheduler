@@ -55,6 +55,7 @@ function onOpen() {
     .addItem('③ 규칙 검사 / 위반 표시', 'checkRules')
     .addItem('칸 넓히기 / 보기 좋게', 'formatLayout')
     .addSeparator()
+    .addItem('수기 입력 잠금 해제(전체 새로 짜기)', 'resetPresetLock')
     .addItem('표 내용만 비우기', 'clearDutyValues')
     .addToUi();
 }
@@ -408,24 +409,21 @@ function generateDuty() {
     return;
   }
 
-  // ── 표에 직접 입력해둔 칸 읽기 (부분 입력=고정, 빈칸만 채움) ──
-  // 일부만 채워져 있으면 "입력 유지 모드"(찍은 칸 고정), 비었거나 꽉 찼으면 "새 배정 모드"
+  // ── 표에 직접 입력해둔 칸 읽기 + 영속 잠금 ──
+  // 수기 입력 칸은 문서 속성에 저장돼 재실행해도 계속 고정된다.
+  //  · 첫 실행(직전 생성본 없음): 부분 입력이면 채워진 칸 전부 고정 (기존 동작)
+  //  · 재실행: 저장된 잠금 + (직전 생성본과 달라진 칸 = 새 수기 입력)을 고정
+  //  · 잠긴 칸을 지우고 실행하면 그 칸은 잠금 해제
   var preset = null, presetCount = 0;
   var ss0 = SpreadsheetApp.getActiveSpreadsheet();
   var d0 = ss0.getSheetByName(DUTY_SHEET);
   if (d0) {
     try {
       var cur = d0.getRange(DUTY_DATA_START_ROW, 2, cfg.nurses.length, cfg.numDays).getValues();
-      var filled = 0, empty = 0, tmp = [];
-      for (var pi = 0; pi < cfg.nurses.length; pi++) {
-        tmp[pi] = {};
-        for (var pj = 0; pj < cfg.numDays; pj++) {
-          var v = (cur[pi][pj] || '').toString().trim().toUpperCase();
-          if (v === 'D' || v === 'E' || v === 'N' || v === 'O') { tmp[pi][pj + 1] = v; filled++; }
-          else empty++;
-        }
-      }
-      if (filled > 0 && empty > 0) { preset = tmp; presetCount = filled; } // 부분 입력 → 고정
+      var state = loadPresetState(cfg); // {preset, lastGen}
+      preset = computePreset(cur, state.preset, state.lastGen, cfg.nurses.length, cfg.numDays);
+      presetCount = countPresetCells(preset);
+      savePresetState(cfg, preset); // 다음 실행을 위해 잠금 저장(없으면 삭제)
     } catch (e) { preset = null; }
   }
   cfg.preset = preset; // tryBuild / isLocked 가 참고
@@ -447,6 +445,7 @@ function generateDuty() {
   }
 
   writeSchedule(cfg, best.sched);
+  saveLastGenerated(cfg, best.sched); // 다음 실행 때 "수기로 고친 칸"을 구분하는 기준
   checkRules(); // 생성 직후 자동 검사
 
   var sc = best.score;
@@ -455,6 +454,109 @@ function generateDuty() {
     presetMsg + '자동 배정 완료 (미충족 ' + sc.unfilled + ' / 오프편차 ' + sc.offDev +
     ' / 나이트편차 ' + sc.nightDev + ' / 위반 ' + sc.hard + ')',
     '듀티표', 6);
+}
+
+/* ===================== 수기 입력 영속 잠금 ===================== */
+/* 수기 입력(고정) 칸 계산 — 순수 함수.
+   cur: 표의 현재 값(2D), savedPreset: 저장된 잠금({i:{day:'D'}}), lastGen: 직전 생성본(행 문자열 배열)
+   · lastGen 있음(재실행): 저장된 잠금 칸 유지 + 직전 생성본과 달라진 칸을 새 잠금으로 추가.
+     잠긴 칸이 지워져 있으면 잠금 해제.
+   · lastGen 없음(첫 실행): 부분 입력일 때만 채워진 칸 전부 잠금 (꽉 참/빈 표 = 새 배정) */
+function computePreset(cur, savedPreset, lastGen, N, nd) {
+  function norm(v) {
+    v = ('' + (v == null ? '' : v)).trim().toUpperCase();
+    return (v === 'D' || v === 'E' || v === 'N' || v === 'O') ? v : '';
+  }
+  var lg = (lastGen && lastGen.length === N) ? lastGen : null;
+  if (lg) { for (var li = 0; li < N; li++) if (('' + lastGen[li]).length !== nd) { lg = null; break; } }
+
+  var out = {}, has = false;
+  if (lg) {
+    for (var i = 0; i < N; i++) {
+      for (var j = 0; j < nd; j++) {
+        var v = norm(cur[i][j]);
+        if (!v) continue; // 빈칸 → (잠겨 있었어도) 해제
+        var wasLocked = savedPreset && savedPreset[i] && savedPreset[i][j + 1];
+        var genVal = lg[i].charAt(j);
+        if (wasLocked || v !== genVal) { // 원래 잠금 or 생성본과 다름(=수기 수정)
+          if (!out[i]) out[i] = {};
+          out[i][j + 1] = v; has = true;
+        }
+      }
+    }
+  } else {
+    var filled = 0, empty = 0, tmp = {};
+    for (var i2 = 0; i2 < N; i2++) {
+      for (var j2 = 0; j2 < nd; j2++) {
+        var v2 = norm(cur[i2][j2]);
+        if (v2) { if (!tmp[i2]) tmp[i2] = {}; tmp[i2][j2 + 1] = v2; filled++; }
+        else empty++;
+      }
+    }
+    if (filled > 0 && empty > 0) { out = tmp; has = true; } // 부분 입력 → 고정
+  }
+  return has ? out : null;
+}
+
+function countPresetCells(preset) {
+  if (!preset) return 0;
+  var c = 0;
+  for (var i in preset) for (var d in preset[i]) c++;
+  return c;
+}
+
+function presetKeys(cfg) {
+  var suffix = cfg.year + '_' + cfg.month;
+  return { preset: 'duty_preset_' + suffix, lastGen: 'duty_lastgen_' + suffix };
+}
+
+/* 저장된 잠금/직전 생성본 로드 (실패 시 빈 상태) */
+function loadPresetState(cfg) {
+  try {
+    var p = PropertiesService.getDocumentProperties();
+    var k = presetKeys(cfg);
+    return {
+      preset: JSON.parse(p.getProperty(k.preset) || 'null'),
+      lastGen: JSON.parse(p.getProperty(k.lastGen) || 'null')
+    };
+  } catch (e) { return { preset: null, lastGen: null }; }
+}
+
+function savePresetState(cfg, preset) {
+  try {
+    var p = PropertiesService.getDocumentProperties();
+    var k = presetKeys(cfg);
+    if (preset) p.setProperty(k.preset, JSON.stringify(preset));
+    else p.deleteProperty(k.preset);
+  } catch (e) { /* 저장 실패해도 이번 실행엔 지장 없음 */ }
+}
+
+/* 생성 결과를 행 문자열 배열로 저장 → 다음 실행 때 수기 수정 칸 감지 기준 */
+function saveLastGenerated(cfg, sched) {
+  try {
+    var rows = [];
+    for (var i = 0; i < cfg.nurses.length; i++) {
+      var s = '';
+      for (var d = 1; d <= cfg.numDays; d++) s += (sched[i][d] || 'O');
+      rows.push(s);
+    }
+    PropertiesService.getDocumentProperties()
+      .setProperty(presetKeys(cfg).lastGen, JSON.stringify(rows));
+  } catch (e) { /* 무시 */ }
+}
+
+/* 메뉴: 저장된 수기 입력 잠금을 전부 해제 (표 내용은 그대로) */
+function resetPresetLock() {
+  var cfg = readSettings();
+  try {
+    var p = PropertiesService.getDocumentProperties();
+    var k = presetKeys(cfg);
+    p.deleteProperty(k.preset);
+    p.deleteProperty(k.lastGen);
+  } catch (e) {}
+  SpreadsheetApp.getActiveSpreadsheet().toast(
+    '수기 입력 잠금을 모두 해제했어요. 다음 [② 자동 배정]은 표 전체를 새로 짭니다.\n' +
+    '(표가 부분 입력 상태면 그 칸들은 다시 고정됩니다)', '듀티표', 6);
 }
 
 /* 한 번의 배정 시도 */
@@ -1378,4 +1480,11 @@ function clearDutyValues() {
   if (!d) return;
   d.getRange(DUTY_DATA_START_ROW, 2, cfg.nurses.length, cfg.numDays)
     .clearContent().setBackground(null);
+  // 표를 비우면 수기 입력 잠금도 같이 초기화 (완전 새 시작)
+  try {
+    var p = PropertiesService.getDocumentProperties();
+    var k = presetKeys(cfg);
+    p.deleteProperty(k.preset);
+    p.deleteProperty(k.lastGen);
+  } catch (e) {}
 }
