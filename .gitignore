@@ -1,3 +1,6 @@
 .omc/
 .DS_Store
 *.log
+
+# clasp 개인 연결 설정
+.clasp.json
