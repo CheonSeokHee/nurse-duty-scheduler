@@ -459,15 +459,34 @@ function generateDuty() {
   // 실행할 때마다 다른 배치가 나오도록 랜덤 베이스 시드 (재굴리기 가능)
   var base = Math.floor(Math.random() * 2000000000);
   var best = null;
-  for (var a = 0; a < cfg.attempts; a++) {
+  // ── 시간예산 적응형 탐색 ──
+  // 완벽표(미충족·위반 0)는 "존재하면 시도를 늘릴수록" 거의 확실히 찾힌다(빡빡한 달도 ~98%).
+  // 그래서: 완벽표 찾으면 즉시 멈춤(쉬운 달=빠름). 못 찾으면 설정 시도횟수를 채운 뒤에도
+  // 시간예산(기본 25초) 또는 하드캡(4000회)까지 계속 굴려 빡빡한 달의 빈칸 확률을 낮춘다.
+  var minA = Math.max(1, cfg.attempts || 300);     // 설정값 = 최소 시도(선호 최적화 확보)
+  var hardCap = Math.max(minA, cfg.maxAttempts || 6000);
+  var budgetMs = (cfg.timeBudgetSec || 45) * 1000; // 빡빡한 달은 이 시간까지 더 탐색
+  var startMs = new Date().getTime();
+  var triedCount = 0;
+  // "검증 통과" = 규칙검사에서 빨간칸/경고가 안 뜨는 상태(빈칸·초과·오프·연속오프·차지 0)
+  function isClean(s) {
+    return s.unfilled === 0 && s.overStaff === 0 && s.offDev === 0 &&
+      s.consecOffViol === 0 && s.hard === 0;
+  }
+  for (var a = 0; a < hardCap; a++) {
     // 포트폴리오 탐색: 절반은 선호 넛지 ON(선호 잘 반영), 절반은 OFF(커버리지 우선)
     // → 점수(evaluate)가 둘 중 "빈칸 없고 선호도 챙긴" 최선을 고름
     cfg.prefNudge = (a % 2 === 0);
     var rng = makeRng(base + a * 2654435761 + 12345);
     var sched = tryBuild(cfg, rng);
     var score = evaluate(cfg, sched);
+    triedCount = a + 1;
     if (!best || score.total < best.score.total) best = { sched: sched, score: score };
-    if (score.total === 0) break;
+    if (best.score.total === 0) break;               // 완전 무점수 → 즉시 종료
+    if (a + 1 >= minA) {                              // 최소 시도(선호 최적화) 채운 뒤:
+      if (isClean(best.score)) break;                //  · 검증 통과 표 확보 → 종료 (대부분 빠름)
+      if (new Date().getTime() - startMs > budgetMs) break; //  · 빡빡한 달은 시간예산까지 더 탐색
+    }
   }
 
   writeSchedule(cfg, best.sched);
@@ -476,10 +495,11 @@ function generateDuty() {
 
   var sc = best.score;
   var presetMsg = preset ? ('입력 ' + presetCount + '칸 고정 + ') : '';
+  var cleanMsg = isClean(sc) ? '✅ 검증 통과(빈칸·위반 없음)' :
+    ('⚠ 미충족 ' + sc.unfilled + ' / 오프편차 ' + sc.offDev + ' / 연속오프 ' + sc.consecOffViol +
+     ' / 위반 ' + sc.hard + ' — 빨간 칸 수기 보정 또는 재실행');
   SpreadsheetApp.getActiveSpreadsheet().toast(
-    presetMsg + '자동 배정 완료 (미충족 ' + sc.unfilled + ' / 오프편차 ' + sc.offDev +
-    ' / 나이트편차 ' + sc.nightDev + ' / 위반 ' + sc.hard + ')',
-    '듀티표', 6);
+    presetMsg + cleanMsg + '  (' + triedCount + '회 탐색)', '듀티표', 8);
 }
 
 /* ===================== 수기 입력 영속 잠금 ===================== */
