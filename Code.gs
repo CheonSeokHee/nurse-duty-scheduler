@@ -971,7 +971,11 @@ function chooseFillShift(cfg, sched, i, day) {
 function topUpUnderworked(cfg, sched, rng) {
   var nd = cfg.numDays, N = cfg.nurses.length;
   var maxWork = nd - cfg.offMin;   // 이 이상 일하면 오프 < 최소 → 금지
-  var minWork = nd - cfg.offMax;   // 이만큼은 일해야 오프 ≤ 최대
+  // 1인 최소 근무: 오프최대 기준(nd-offMax)과 "커버리지 기준"(필요인원합×일수/N) 중 큰 값.
+  // 인원이 빡빡(예: 12명·하루8명)하면 커버리지 기준이 더 커서 전원을 오프최소(10)로 밀어
+  // 빈칸을 없앤다. (안 그러면 누군가 오프11에 머물러 마지막 칸이 미달됨)
+  var coverageMin = Math.ceil((cfg.need.D + cfg.need.E + cfg.need.N) * nd / N);
+  var minWork = Math.min(maxWork, Math.max(nd - cfg.offMax, coverageMin));
   var maxE = cfg.maxEvening || 3;
 
   // ① 부족한 근무(빈칸) 채우기 — 이브닝 우선, 단 오프 최소(상한)는 반드시 지킴
