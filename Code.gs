@@ -95,7 +95,7 @@ function setupSheets() {
 
   // 간호사 목록 헤더
   s.getRange(NURSE_START_ROW - 1, 1).setValue('■ 간호사 목록 (역할: 차지 / 액팅)').setFontWeight('bold');
-  var headers = [['이름', '역할', '요청오프(예: 3,10,21)', '요청근무(예: D:5 / N:12)', '전월 나이트(일)', '선호 듀티', '강도']];
+  var headers = [['이름', '역할', '요청오프(예: 3,10,21)', '듀티개수(예: D:14/N:5/E:0)', '전월 나이트(일)', '선호 듀티', '강도']];
   s.getRange(NURSE_START_ROW, 1, 1, 7).setValues(headers)
     .setFontWeight('bold').setBackground(COLORS.HEADER).setFontColor('#ffffff');
 
@@ -192,7 +192,7 @@ function readSettings() {
       name: name,
       charge: role === '차지',
       reqOff: reqOff,
-      reqWork: parseReqWork(vals[i][3]),
+      dutyCount: parseDutyCount(vals[i][3]), // 듀티 개수 목표: {D:14, N:5, E:0} 또는 null
       prevNightDays: prevNightDays,
       prevBlocks: Math.round(prevNightDays / (cfg.nightLen || 3)),
       prefShift: parsePref(vals[i][5]), // 선호 듀티 (소프트): '' / 'D' / 'E' / 'N'
@@ -215,15 +215,17 @@ function parseReqOff(v) {
   return out;
 }
 
-function parseReqWork(v) {
-  // "D:5 / N:12" -> { 5:'D', 12:'N' }
-  if (!v) return {};
-  var out = {};
+/* 듀티 개수: "D:14/N:5/E:0" -> { D:14, N:5, E:0 } — 이번 달 듀티별 목표 개수.
+   (특정 날짜 지정은 듀티표에 직접 입력하면 자동 고정되므로 이 열은 개수 전용)
+   0도 의미 있음: E:0 = 이브닝 안 받음 */
+function parseDutyCount(v) {
+  if (!v) return null;
+  var out = {}, has = false;
   ('' + v).split(/[\/,]/).forEach(function (tok) {
-    var m = ('' + tok).trim().match(/^([DENO]):(\d+)$/i);
-    if (m) out[parseInt(m[2], 10)] = m[1].toUpperCase();
+    var m = ('' + tok).trim().match(/^([DEN]):(\d+)$/i);
+    if (m) { out[m[1].toUpperCase()] = parseInt(m[2], 10); has = true; }
   });
-  return out;
+  return has ? out : null;
 }
 
 /* {3:true, 10:true, ...} 같은 날짜맵에서 가장 빠른 날 반환 (없으면 0) */
@@ -274,6 +276,13 @@ function nightWeightOf(nurse) {
 /* 선호 반영 점수(prefMiss) 1인당 가중 — 강할수록 best 선택에서 선호를 더 챙김 */
 function prefMissWeightOf(nurse) {
   return PREFMISS_WEIGHT_MAP[nurse.prefStrength] || 3;
+}
+
+/* i의 한 달 중 특정 듀티 개수 */
+function countNurseShift(sched, i, shift, nd) {
+  var c = 0;
+  for (var d = 1; d <= nd; d++) if (sched[i][d] === shift) c++;
+  return c;
 }
 
 /* 선호 근무 목표 일수 = 예상 근무일(nd-offMax) × 강도별 목표 비율
@@ -587,13 +596,10 @@ function tryBuild(cfg, rng) {
     for (var day = 0; day <= nd + 3; day++) sched[i][day] = '';
   }
 
-  // 0) 요청근무/요청오프 먼저 고정
+  // 0) 요청오프 먼저 고정 (듀티 개수 목표는 나이트 배정/점수에서 반영,
+  //    특정 날짜 근무 지정은 듀티표에 직접 입력 → preset으로 고정됨)
   for (var i2 = 0; i2 < N; i2++) {
     var nu = cfg.nurses[i2];
-    for (var dd in nu.reqWork) {
-      var di = parseInt(dd, 10);
-      if (di >= 1 && di <= nd) sched[i2][di] = nu.reqWork[dd];
-    }
     for (var od in nu.reqOff) {
       var oi = parseInt(od, 10);
       if (oi >= 1 && oi <= nd && !sched[i2][oi]) sched[i2][oi] = SHIFT.O;
@@ -937,7 +943,6 @@ function enforceFirstOffNight(cfg, sched) {
 function isLocked(cfg, i, day) {
   var nu = cfg.nurses[i];
   if (nu.reqOff && nu.reqOff[day]) return true;
-  if (nu.reqWork && nu.reqWork[day]) return true;
   if (cfg.preset && cfg.preset[i] && cfg.preset[i][day]) return true; // 표에 직접 입력한 칸
   if (cfg.forcedDay && cfg.forcedDay[i] === day) return true;          // 첫 요청오프 전날 Day 고정
   if (cfg.forcedNight && cfg.forcedNight[i] === day) return true;      // 첫 요청오프 다음날 N 고정
@@ -949,9 +954,14 @@ function isLocked(cfg, i, day) {
    단, 그 사람이 Day를 선호하면 D를 먼저 시도 */
 function chooseFillShift(cfg, sched, i, day) {
   var maxE = cfg.maxEvening || 3;
+  var dc = cfg.nurses[i].dutyCount;
+  // 듀티 개수 목표: D 미달이면 D 먼저, E 목표 도달(또는 E:0)이면 E 회피
+  if (dc && dc.D != null && countNurseShift(sched, i, 'D', cfg.numDays) < dc.D &&
+      canWork(cfg, sched, i, day, 'D')) return 'D';
+  var eBlocked = dc && dc.E != null && countNurseShift(sched, i, 'E', cfg.numDays) >= dc.E;
   if (cfg.nurses[i].prefShift === 'D' && !prefSatisfied(cfg, sched, i) &&
       canWork(cfg, sched, i, day, 'D')) return 'D';
-  if (countShift(sched, day, 'E') < maxE && canWork(cfg, sched, i, day, 'E')) return 'E';
+  if (!eBlocked && countShift(sched, day, 'E') < maxE && canWork(cfg, sched, i, day, 'E')) return 'E';
   if (canWork(cfg, sched, i, day, 'D')) return 'D';
   return '';
 }
@@ -1139,6 +1149,30 @@ function allocByWeight(weights, total) {
   return floors;
 }
 
+/* 역할 그룹(idxs)의 1인당 나이트 수 배분 — 듀티 개수(N:n) 지정자는 그 수를 "고정"하고
+   나머지 인원이 잔여분을 선호 가중치로 나눠 갖는다. (지정 합이 총량 초과면 비례 축소) */
+function roleNightCounts(cfg, idxs, total) {
+  var out = [], fixedSum = 0, freeIdx = [], freeW = [], j;
+  for (j = 0; j < idxs.length; j++) {
+    var nu = cfg.nurses[idxs[j]];
+    if (nu.dutyCount && nu.dutyCount.N != null) {
+      var f = Math.max(0, Math.min(nu.dutyCount.N, total));
+      out[j] = f; fixedSum += f;
+    } else { out[j] = -1; freeIdx.push(j); freeW.push(nightWeightOf(nu)); }
+  }
+  var rest = total - fixedSum;
+  if (rest < 0) { // 지정 합이 역할 총량 초과(입력 과다) → 전체 비례 축소
+    var w2 = [];
+    for (j = 0; j < idxs.length; j++) w2.push(out[j] > 0 ? out[j] : 0);
+    return allocByWeight(w2, total);
+  }
+  if (freeIdx.length) {
+    var fa = allocByWeight(freeW, rest);
+    for (var k = 0; k < freeIdx.length; k++) out[freeIdx[k]] = fa[k];
+  }
+  return out; // 자유 인원이 없는데 잔여>0이면 합<총량 → 타일링 실패 → 그리디 폴백(의도)
+}
+
 /* 한 역할(차지 또는 액팅)이 nd일을 1인 1명씩 덮도록 2~3블록 타일링 → owner[1..nd] (실패 시 null)
    counts: idxs와 같은 길이의 1인당 나이트 수(합=nd). 없으면 균등 분배. */
 function tileNightRole(nd, idxs, rng, counts) {
@@ -1173,14 +1207,9 @@ function constructNights(cfg, sched, rng) {
   var nd = cfg.numDays, N = cfg.nurses.length, charges = [], actings = [];
   for (var i = 0; i < N; i++) cfg.nurses[i].charge ? charges.push(i) : actings.push(i);
   if (!charges.length || !actings.length) return false;
-  // 선호 듀티+강도 → 1인당 나이트 목표를 가중치로 분배(역할 그룹 합은 nd 유지 → 매 밤 커버리지 그대로)
-  function nightWeights(idxs) {
-    var w = [];
-    for (var j = 0; j < idxs.length; j++) w[j] = nightWeightOf(cfg.nurses[idxs[j]]);
-    return w;
-  }
-  var cCounts = allocByWeight(nightWeights(charges), nd);
-  var aCounts = allocByWeight(nightWeights(actings), nd);
+  // 1인당 나이트 수: 듀티 개수(N:n) 지정자는 고정, 나머지는 선호 가중치 분배 (역할 합 = nd)
+  var cCounts = roleNightCounts(cfg, charges, nd);
+  var aCounts = roleNightCounts(cfg, actings, nd);
 
   // ── 사전 충돌 검증: 요청오프/요청근무/수기입력/전날Day와 부딪히면 그 타일링은 기각 ──
   function tilingValid(co, ao) {
@@ -1279,18 +1308,14 @@ function assignNightsGreedy(cfg, sched, rng) {
   var nightTarget = [];
   for (var ti = 0; ti < N; ti++) nightTarget[ti] = cfg.nurses[ti].charge ? chargeTarget : actingTarget;
 
-  // ── 선호 듀티 반영: 역할 그룹 내에서 나이트 목표를 가중치로 재분배(그룹 합은 유지) ──
-  //    N선호 → 목표↑(가중치 2),  상관없음 → 1,  D/E선호 → 목표↓(가중치 0.5)
+  // ── 역할 그룹 내 목표 재분배: 듀티 개수(N:n) 지정자는 고정, 나머지는 선호 가중치 ──
   //    그룹 합을 그대로 두므로 매 밤 인원/차지 커버리지는 변하지 않음(빈칸 안 생김).
-  function prefWeight(nu) { return nightWeightOf(nu); }
   [true, false].forEach(function (isCharge) {
     var grp = [], sum = 0;
     for (var gi = 0; gi < N; gi++) if (cfg.nurses[gi].charge === isCharge) { grp.push(gi); sum += nightTarget[gi]; }
     if (!grp.length || sum <= 0) return;
-    var wsum = 0; for (var wi2 = 0; wi2 < grp.length; wi2++) wsum += prefWeight(cfg.nurses[grp[wi2]]);
-    if (wsum <= 0) return;
-    for (var ki = 0; ki < grp.length; ki++)
-      nightTarget[grp[ki]] = sum * prefWeight(cfg.nurses[grp[ki]]) / wsum;
+    var counts = roleNightCounts(cfg, grp, Math.round(sum));
+    for (var ki = 0; ki < grp.length; ki++) nightTarget[grp[ki]] = counts[ki];
   });
 
   // 윈도우 개수 W (블록 크기 결정) — 분배 방식 기준
@@ -1481,22 +1506,29 @@ function pickDayCandidate(cfg, sched, day, shift, requireCharge, rng) {
   }
   if (!pool.length) return -1;
   // 1순위: 전체 근무량 적은 사람(총 근무 고르게 = 오프 고르게, 커버리지 안정) →
-  // 2순위: 선호 듀티(같은 근무량이면 그 근무 선호자 먼저) → 3순위: 랜덤.
-  // 선호를 커버리지보다 위에 두면 빈칸(미충족)이 생기므로 일부러 2순위로 둠.
+  // 2순위: 듀티 개수 목표(미달이면 우선/도달이면 후순위) > 선호 듀티 → 3순위: 랜덤.
   // 이미 선호 목표(prefTargetCount)에 도달한 사람은 보통 사람 취급 → 다른 듀티도 섞임.
-  var sat = {};
-  if (PREF_DAY_SORT && cfg.prefNudge !== false) {
-    for (var pi = 0; pi < pool.length; pi++)
-      if (prefSatisfied(cfg, sched, pool[pi])) sat[pool[pi]] = true;
+  var sat = {}, dr = {};
+  for (var pi = 0; pi < pool.length; pi++) {
+    var p = pool[pi], dcp = cfg.nurses[p].dutyCount;
+    if (dcp && dcp[shift] != null)
+      dr[p] = (countNurseShift(sched, p, shift, cfg.numDays) < dcp[shift]) ? 0 : 2;
+    else if (PREF_DAY_SORT && cfg.prefNudge !== false && prefSatisfied(cfg, sched, p)) sat[p] = true;
+  }
+  function rankOf(x) {
+    if (dr[x] !== undefined) return dr[x]; // 듀티 개수 지정이 최우선 (넛지 토글과 무관)
+    if (PREF_DAY_SORT && cfg.prefNudge !== false)
+      return sat[x] ? 1 : dayPrefRank(cfg.nurses[x], shift);
+    return 1;
   }
   pool.sort(function (a, b) {
+    // 듀티 개수 지정은 명시적 지시 → 근무량 균형보다 우선 (목표 도달 시 자동으로 후순위 전환)
+    var da = (dr[a] !== undefined) ? dr[a] : 1, db = (dr[b] !== undefined) ? dr[b] : 1;
+    if (da !== db) return da - db;
     var diff = fullWorkload(sched, a, cfg.numDays) - fullWorkload(sched, b, cfg.numDays);
     if (diff !== 0) return diff;
-    if (PREF_DAY_SORT && cfg.prefNudge !== false) {
-      var pa = sat[a] ? 1 : dayPrefRank(cfg.nurses[a], shift);
-      var pb = sat[b] ? 1 : dayPrefRank(cfg.nurses[b], shift);
-      if (pa !== pb) return pa - pb;
-    }
+    var pa = rankOf(a), pb = rankOf(b);
+    if (pa !== pb) return pa - pb;
     return rng() - 0.5;
   });
   return pool[0];
@@ -1584,8 +1616,9 @@ function evaluate(cfg, sched) {
   var maxChargeN = 0, minActingN = 1e9, hasActing = false;
   var prefMiss = 0; // 선호 듀티 미반영도(선호 근무를 적게 할수록 ↑) — 적을수록 선호 잘 반영
   var consecOffViol = 0; // 연속오프 한도(차지3/액팅2) 초과 — 탐색이 이런 배치를 피하게 함
+  var dutyMiss = 0; // 듀티 개수 목표(예: D:14/N:5/E:0)와의 차이 합 — 적을수록 목표 충족
   for (var i = 0; i < N; i++) {
-    var off = 0, nights = 0, work = 0, matchPref = 0;
+    var off = 0, nights = 0, work = 0, matchPref = 0, cntD = 0, cntE = 0;
     var pref = cfg.nurses[i].prefShift;
     var maxCO = cfg.nurses[i].charge ? (cfg.maxConsecOffCharge || 3) : (cfg.maxConsecOffActing || 2);
     var offRun = 0;
@@ -1595,12 +1628,23 @@ function evaluate(cfg, sched) {
         off++;
         offRun++; if (offRun > maxCO) consecOffViol++;
       }
-      else { work++; offRun = 0; if (v === 'N') nights++; if (pref && v === pref) matchPref++; }
+      else {
+        work++; offRun = 0;
+        if (v === 'N') nights++; else if (v === 'D') cntD++; else if (v === 'E') cntE++;
+        if (pref && v === pref) matchPref++;
+      }
     }
     if (off < cfg.offMin) offDev += (cfg.offMin - off);
     if (off > cfg.offMax) offDev += (off - cfg.offMax);
-    // 선호가 있는 사람의 나이트 편차는 "의도된 편차"이므로 균등도/역할 벌점에서 제외
-    if (!pref) {
+    // 듀티 개수 목표: 지정된 듀티마다 |목표-실제| 누적
+    var dc = cfg.nurses[i].dutyCount;
+    if (dc) {
+      if (dc.D != null) dutyMiss += Math.abs(dc.D - cntD);
+      if (dc.E != null) dutyMiss += Math.abs(dc.E - cntE);
+      if (dc.N != null) dutyMiss += Math.abs(dc.N - nights);
+    }
+    // 선호/개수지정이 있는 사람의 나이트 편차는 "의도된 편차" → 균등도/역할 벌점에서 제외
+    if (!pref && !(dc && dc.N != null)) {
       nightDev += Math.abs(nights - avgNight); // 나이트 균등도 (평균에서 벗어난 정도)
       if (cfg.nurses[i].charge) { if (nights > maxChargeN) maxChargeN = nights; }
       else { hasActing = true; if (nights < minActingN) minActingN = nights; }
@@ -1627,10 +1671,11 @@ function evaluate(cfg, sched) {
   }
   return {
     unfilled: unfilled, hard: hard, offDev: offDev, overStaff: overStaff, consecOffViol: consecOffViol,
-    nightDev: Math.round(nightDev), roleViol: roleViol, prefMiss: prefMiss, donMiss: donMiss,
-    // 커버리지(unfilled/overStaff/hard)·오프는 큰 가중으로 절대 우선 → 선호(prefMiss)는 그 안에서만 best 선택을 좌우
+    nightDev: Math.round(nightDev), roleViol: roleViol, prefMiss: prefMiss, donMiss: donMiss, dutyMiss: dutyMiss,
+    // 커버리지(unfilled/overStaff/hard)·오프는 큰 가중으로 절대 우선 →
+    // 듀티개수(dutyMiss)·선호(prefMiss)는 그 안에서만 best 선택을 좌우 (개수 지정 > 선호)
     total: unfilled * 100 + overStaff * 60 + hard * 80 + offDev * 30 + consecOffViol * 25 + donMiss * 50 +
-      nightDev * 6 + roleViol * 10 + prefMiss
+      dutyMiss * 12 + nightDev * 6 + roleViol * 10 + prefMiss
   };
 }
 
