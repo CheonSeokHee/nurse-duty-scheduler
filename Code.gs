@@ -471,7 +471,7 @@ function generateDuty() {
   // "검증 통과" = 규칙검사에서 빨간칸/경고가 안 뜨는 상태(빈칸·초과·오프·연속오프·차지 0)
   function isClean(s) {
     return s.unfilled === 0 && s.overStaff === 0 && s.offDev === 0 &&
-      s.consecOffViol === 0 && s.hard === 0;
+      s.consecOffViol === 0 && s.hard === 0 && s.patViol === 0;
   }
   for (var a = 0; a < hardCap; a++) {
     // 포트폴리오 탐색: 절반은 선호 넛지 ON(선호 잘 반영), 절반은 OFF(커버리지 우선)
@@ -701,7 +701,45 @@ function tryBuild(cfg, rng) {
   // 4) 연속 오프 최대 제한 (3일 이상 연속 오프 → 가운데를 근무로 전환)
   limitConsecutiveOff(cfg, sched);
 
+  // 5) 최종 안전망: 남은 하드 패턴 위반(N다음D/E, E다음D, 연속근무, 나이트 전후오프)은
+  //    충돌 근무 칸을 O로 바꿔 "불법(규칙위반)"을 "빈칸(인원미달 경고)"로 강등.
+  //    드물게(빡빡한 달) 구성이 못 피하는 1칸을 합법 상태로 만든다.
+  repairHardViolations(cfg, sched);
+
   return sched;
+}
+
+/* 최종 하드 패턴 위반 제거 — 충돌 근무 칸을 O로 (잠긴/요청/수기 칸은 보존) */
+function repairHardViolations(cfg, sched) {
+  var nd = cfg.numDays, N = cfg.nurses.length;
+  for (var i = 0; i < N; i++) {
+    for (var pass = 0; pass < 5; pass++) {
+      var changed = false;
+      // N 다음날 D/E, E 다음날 D → 뒷 칸(원인) 제거
+      for (var d = 2; d <= nd; d++) {
+        var cur = sched[i][d], pv = sched[i][d - 1];
+        var bad = ((cur === 'D' || cur === 'E') && pv === 'N') || (cur === 'D' && pv === 'E');
+        if (bad && cur !== 'O' && !isLocked(cfg, i, d)) { sched[i][d] = 'O'; changed = true; }
+      }
+      // 연속근무 초과 → 한도 넘는 칸 제거
+      var run = 0;
+      for (var d2 = 1; d2 <= nd; d2++) {
+        var v = sched[i][d2];
+        if (v && v !== 'O') { run++; if (run > cfg.maxConsec && !isLocked(cfg, i, d2)) { sched[i][d2] = 'O'; run = 0; changed = true; } }
+        else run = 0;
+      }
+      // 나이트 전후 필수오프 자리에 근무가 있으면 제거 (나이트 자체는 보존)
+      var blocks = nightBlocksOf(cfg, sched, i);
+      for (var b = 0; b < blocks.length; b++) {
+        var B = blocks[b];
+        var obn = (B.len >= cfg.nightLen) ? cfg.offBeforeNight : 0;
+        for (var x = 1; x <= obn; x++) { var bd = B.s - x; var bv = sched[i][bd]; if (bd >= 1 && bv && bv !== 'O' && bv !== 'N' && !isLocked(cfg, i, bd)) { sched[i][bd] = 'O'; changed = true; } }
+        var oan = offAfterFor(cfg, B.len);
+        for (var y = 1; y <= oan; y++) { var ad = B.e + y; var av = sched[i][ad]; if (ad <= nd && av && av !== 'O' && av !== 'N' && !isLocked(cfg, i, ad)) { sched[i][ad] = 'O'; changed = true; } }
+      }
+      if (!changed) break;
+    }
+  }
 }
 
 /* 맞교환 보정: 인원이 부족한 칸을, 근무상한(오프=최소)에 걸린 P의 '다른 날 근무'를
@@ -1641,21 +1679,37 @@ function evaluate(cfg, sched) {
   var prefMiss = 0; // 선호 듀티 미반영도(선호 근무를 적게 할수록 ↑) — 적을수록 선호 잘 반영
   var consecOffViol = 0; // 연속오프 한도(차지3/액팅2) 초과 — 탐색이 이런 배치를 피하게 함
   var dutyMiss = 0; // 듀티 개수 목표(예: D:14/N:5/E:0)와의 차이 합 — 적을수록 목표 충족
+  var patViol = 0; // 하드 패턴 위반: N다음D/E, E다음D, 연속근무 초과, 나이트 전후 필수오프 미충족
   for (var i = 0; i < N; i++) {
     var off = 0, nights = 0, work = 0, matchPref = 0, cntD = 0, cntE = 0;
     var pref = cfg.nurses[i].prefShift;
     var maxCO = cfg.nurses[i].charge ? (cfg.maxConsecOffCharge || 3) : (cfg.maxConsecOffActing || 2);
-    var offRun = 0;
+    var offRun = 0, workRun = 0;
     for (var d = 1; d <= nd; d++) {
-      var v = sched[i][d];
+      var v = sched[i][d], pvd = (d > 1) ? sched[i][d - 1] : '';
       if (v === 'O' || v === '') {
-        off++;
+        off++; workRun = 0;
         offRun++; if (offRun > maxCO) consecOffViol++;
       }
       else {
-        work++; offRun = 0;
+        work++; offRun = 0; workRun++;
+        if (workRun > cfg.maxConsec) patViol++;                 // 연속근무 초과
+        if ((v === 'D' || v === 'E') && pvd === 'N') patViol++; // N 다음날 D/E 금지
+        if (v === 'D' && pvd === 'E') patViol++;                // E 다음날 D 금지
         if (v === 'N') nights++; else if (v === 'D') cntD++; else if (v === 'E') cntE++;
         if (pref && v === pref) matchPref++;
+      }
+    }
+    // 나이트 블록 길이 & 전후 필수오프
+    for (var nb = 1; nb <= nd; nb++) {
+      if (sched[i][nb] === 'N' && sched[i][nb - 1] !== 'N') {
+        var blen = 0; while (sched[i][nb + blen] === 'N') blen++;
+        var bend = nb + blen - 1;
+        if (blen > cfg.nightLen && bend < nd) patViol++;        // 나이트 연속 초과
+        var ob2 = (blen >= cfg.nightLen) ? cfg.offBeforeNight : 0;
+        for (var bx = 1; bx <= ob2; bx++) { var bdd = nb - bx; if (bdd >= 1 && sched[i][bdd] !== 'O' && sched[i][bdd] !== '') patViol++; }
+        var oa2 = offAfterFor(cfg, blen);
+        for (var ax = 1; ax <= oa2; ax++) { var add = bend + ax; if (add <= nd && sched[i][add] !== 'O' && sched[i][add] !== '') patViol++; }
       }
     }
     if (off < cfg.offMin) offDev += (cfg.offMin - off);
@@ -1695,11 +1749,11 @@ function evaluate(cfg, sched) {
   }
   return {
     unfilled: unfilled, hard: hard, offDev: offDev, overStaff: overStaff, consecOffViol: consecOffViol,
-    nightDev: Math.round(nightDev), roleViol: roleViol, prefMiss: prefMiss, donMiss: donMiss, dutyMiss: dutyMiss,
-    // 커버리지(unfilled/overStaff/hard)·오프는 큰 가중으로 절대 우선 →
-    // 듀티개수(dutyMiss)·선호(prefMiss)는 그 안에서만 best 선택을 좌우 (개수 지정 > 선호)
-    total: unfilled * 100 + overStaff * 60 + hard * 80 + offDev * 30 + consecOffViol * 25 + donMiss * 50 +
-      dutyMiss * 12 + nightDev * 6 + roleViol * 10 + prefMiss
+    patViol: patViol, nightDev: Math.round(nightDev), roleViol: roleViol, prefMiss: prefMiss, donMiss: donMiss, dutyMiss: dutyMiss,
+    // 하드 패턴(patViol: N다음D/E, E다음D, 연속근무, 나이트 전후오프)은 절대 위반 불가 →
+    // 커버리지·오프와 함께 최상위 가중. 듀티개수·선호는 그 안에서만 best 선택을 좌우.
+    total: patViol * 120 + unfilled * 100 + overStaff * 60 + hard * 80 + offDev * 30 + consecOffViol * 25 +
+      donMiss * 50 + dutyMiss * 12 + nightDev * 6 + roleViol * 10 + prefMiss
   };
 }
 
