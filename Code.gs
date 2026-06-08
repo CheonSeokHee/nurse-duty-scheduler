@@ -181,6 +181,9 @@ function readSettings() {
     offMax: num(16),
     attempts: num(17) || 300
   };
+  // 필수 인원(floor): 이 밑으로 떨어지면 "빨강(미달)". D/E는 목표-1(예: 3→2)까지 허용,
+  // 나머지 3번째는 S(오프 여유 액팅)로 채움. N은 정확(완화 없음).
+  cfg.needFloor = { D: Math.max(1, cfg.need.D - 1), E: Math.max(1, cfg.need.E - 1), N: cfg.need.N };
 
   // 간호사 목록 읽기
   var last = s.getLastRow();
@@ -722,25 +725,27 @@ function tryBuild(cfg, rng) {
   return sched;
 }
 
-/* 데이/이브닝 미달분을 그날 오프인 액팅을 S(추가근무)로 호출해 메움.
-   - 액팅만, 요청오프/나이트오프 등 잠긴 칸 보호, N 다음날 금지, 연속근무 한도 준수
-   - 오프 많은 사람 우선(과근 분산). S는 오버타임이라 오프 하한 아래로 내려갈 수 있음(evaluate가 면제) */
+/* 목표 인원(데이3/이브닝3)에서 모자란 "3번째"를 S(액팅 추가근무)로 채움.
+   "오프 유지": 오프에 여유 있는 사람(오프 > 최소)만 불러서 오프가 범위(10~11) 밖으로 안 나감.
+   - ① 그날 쉬면서 오프 여유 있는 액팅을 S로
+   - ② 쉬는 여유 액팅이 없으면, 일하는 액팅 B를 S로 돌리고 빈자리는 쉬는 여유 차지 C가 메움
+   필수(floor=2)는 정규 배정에서 이미 채워짐. 여유 없으면 2명으로 두고 빨강 안 만듦. */
 function assignSupport(cfg, sched) {
   var nd = cfg.numDays, N = cfg.nurses.length;
-  // 그날 i를 S로 부를 수 있나 (액팅·미잠금·N다음날아님·연속근무 OK)
-  function canCallS(i, d) {
-    if (cfg.nurses[i].charge) return false;
-    if (isLocked(cfg, i, d)) return false;
-    if (d > 1 && sched[i][d - 1] === 'N') return false;
+  function consecOK(i, d) {
     var back = 0; for (var b = d - 1; b >= 1; b--) { var pv = sched[i][b]; if (pv && pv !== 'O') back++; else break; }
     var fwd = 0; for (var f = d + 1; f <= nd; f++) { var nv = sched[i][f]; if (nv && nv !== 'O') fwd++; else break; }
     return back + 1 + fwd <= cfg.maxConsec;
+  }
+  function canCallS(i, d) { // 액팅·미잠금·N다음날아님·연속OK·오프여유
+    return !cfg.nurses[i].charge && !isLocked(cfg, i, d) && !(d > 1 && sched[i][d - 1] === 'N') &&
+      consecOK(i, d) && countOffRow(sched, i, nd) > cfg.offMin;
   }
   for (var d = 1; d <= nd; d++) {
     var gap = (cfg.need.D - countShift(sched, d, 'D')) + (cfg.need.E - countShift(sched, d, 'E'));
     var guard = 0;
     while (gap > 0 && guard++ < N * 2) {
-      // ① 그날 쉬는 액팅을 바로 S로 (오프 많은 사람 우선 → 과근 분산)
+      // ① 그날 쉬는 '오프 여유' 액팅을 바로 S로 (오프 많은 사람 우선 → 과근 분산)
       var best = -1, bestOff = -1;
       for (var i = 0; i < N; i++) {
         if (sched[i][d] !== 'O') continue;
@@ -749,26 +754,25 @@ function assignSupport(cfg, sched) {
         if (o > bestOff) { bestOff = o; best = i; }
       }
       if (best >= 0) { sched[best][d] = 'S'; gap--; continue; }
-      // ② 쉬는 액팅이 없으면: 그날 일하는 액팅 B를 S로 돌리고, 빈 B자리를 쉬는 차지 C가 메움
-      //    (액팅이 추가근무 S를 맡고, 차지가 정규 D/E를 대신 → "액팅번 S" 유지하며 한 명 더 투입)
+      // ② 쉬는 여유 액팅이 없으면: 일하는 액팅 B를 S로, 빈자리를 '오프 여유' 차지 C가 메움
       var done = false;
       for (var B = 0; B < N && !done; B++) {
         if (cfg.nurses[B].charge) continue;
         var sh = sched[B][d];
-        if (sh !== 'D' && sh !== 'E') continue;     // B는 그날 D/E 근무 중
+        if (sh !== 'D' && sh !== 'E') continue;
         if (isLocked(cfg, B, d)) continue;
         for (var C = 0; C < N && !done; C++) {
-          if (!cfg.nurses[C].charge) continue;      // C는 차지
-          if (sched[C][d] !== 'O') continue;         // C는 그날 오프
+          if (!cfg.nurses[C].charge) continue;
+          if (sched[C][d] !== 'O') continue;
           if (isLocked(cfg, C, d)) continue;
-          if (countOffRow(sched, C, nd) <= cfg.offMin) continue; // 차지는 오프 최소 밑으로 안 내림
+          if (countOffRow(sched, C, nd) <= cfg.offMin) continue; // 차지도 오프 여유 있을 때만
           var saveB = sched[B][d], saveC = sched[C][d];
           sched[C][d] = sh; sched[B][d] = 'S';
           if (canWork(cfg, sched, C, d, sh)) { gap--; done = true; }
           else { sched[B][d] = saveB; sched[C][d] = saveC; }
         }
       }
-      if (!done) break; // 그날 더 투입할 사람이 없음 → 부득이 미달(빨강)로 남김
+      if (!done) break; // 더 부를 여유 인원 없음 → 2명으로 운영(빨강 아님)
     }
   }
 }
@@ -1730,19 +1734,26 @@ function makeRng(seed) {
 /* 점수 (낮을수록 좋음) */
 function evaluate(cfg, sched) {
   var nd = cfg.numDays, N = cfg.nurses.length;
-  var unfilled = 0, hard = 0, offDev = 0, overStaff = 0;
+  var floor = cfg.needFloor || cfg.need;
+  var unfilled = 0, hard = 0, offDev = 0, overStaff = 0, targetMiss = 0;
 
   for (var day = 1; day <= nd; day++) {
-    // N은 정확 인원, D/E는 합산 미달분에서 S(추가근무)가 메운 만큼 차감
-    var ndiff = cfg.need.N - countShift(sched, day, 'N');
+    var cntD = countShift(sched, day, 'D'), cntE = countShift(sched, day, 'E');
+    var cntN = countShift(sched, day, 'N'), sCnt = countShift(sched, day, 'S');
+    // N은 정확 인원
+    var ndiff = cfg.need.N - cntN;
     if (ndiff > 0) unfilled += ndiff; if (ndiff < 0) overStaff += (-ndiff);
-    var deDef = Math.max(0, cfg.need.D - countShift(sched, day, 'D')) +
-                Math.max(0, cfg.need.E - countShift(sched, day, 'E'));
-    var sCnt = countShift(sched, day, 'S');
-    unfilled += Math.max(0, deDef - sCnt);         // S가 메운 D/E 미달은 빈칸으로 안 셈
-    overStaff += Math.max(0, sCnt - deDef);        // 미달도 아닌데 S가 남으면 초과로 취급
-    overStaff += Math.max(0, (countShift(sched, day, 'D') - cfg.need.D)) +
-                 Math.max(0, (countShift(sched, day, 'E') - cfg.need.E));
+    // D/E: 필수(floor) 미달 = 빨강(unfilled). 목표(need)까지의 3번째는 S로 채우면 인정,
+    //      못 채워도 빨강 아님(targetMiss=가벼운 벌점). S는 floor 채운 뒤 목표 보전에만 인정.
+    var floorDef = Math.max(0, floor.D - cntD) + Math.max(0, floor.E - cntE);
+    var sForFloor = Math.min(sCnt, floorDef);
+    unfilled += Math.max(0, floorDef - sCnt);      // floor 미달을 S로도 못 메우면 빨강
+    var sLeft = sCnt - sForFloor;                   // floor 채우고 남은 S
+    var targetDef = Math.max(0, cfg.need.D - Math.max(cntD, floor.D)) +
+                    Math.max(0, cfg.need.E - Math.max(cntE, floor.E));
+    targetMiss += Math.max(0, targetDef - sLeft);   // 3번째 미충족(가벼움). S가 메우면 0
+    overStaff += Math.max(0, sLeft - targetDef);    // 목표도 넘겨 남는 S = 초과
+    overStaff += Math.max(0, cntD - cfg.need.D) + Math.max(0, cntE - cfg.need.E);
     WORK_SHIFTS.forEach(function (sh) {
       if (countShift(sched, day, sh) > 0 && !shiftHasCharge(cfg, sched, day, sh)) hard++; // 차지 없는 근무
     });
@@ -1828,12 +1839,12 @@ function evaluate(cfg, sched) {
   }
   return {
     unfilled: unfilled, hard: hard, offDev: offDev, overStaff: overStaff, consecOffViol: consecOffViol,
-    patViol: patViol, nightLenViol: nightLenViol, nightDev: Math.round(nightDev), roleViol: roleViol,
+    patViol: patViol, nightLenViol: nightLenViol, targetMiss: targetMiss, nightDev: Math.round(nightDev), roleViol: roleViol,
     prefMiss: prefMiss, donMiss: donMiss, dutyMiss: dutyMiss,
-    // 하드 패턴(patViol)은 절대 위반 불가 → 커버리지·오프와 함께 최상위 가중.
-    // 사람별 나이트최대(nightLenViol)·듀티개수·선호는 그 안에서만 best 선택을 좌우.
+    // 하드 패턴·필수인원(floor)·오프는 최상위 가중. 3번째 데이/이브닝(targetMiss)은
+    // "있으면 좋은" 가벼운 벌점 — S/여유로 채우되 못 채워도 빨강 아님.
     total: patViol * 120 + unfilled * 100 + overStaff * 60 + hard * 80 + offDev * 30 + consecOffViol * 25 +
-      donMiss * 50 + nightLenViol * 20 + dutyMiss * 12 + nightDev * 6 + roleViol * 10 + prefMiss
+      donMiss * 50 + nightLenViol * 20 + dutyMiss * 12 + targetMiss * 8 + nightDev * 6 + roleViol * 10 + prefMiss
   };
 }
 
@@ -1937,11 +1948,12 @@ function checkRules() {
       else if (vv === 'N') { cN++; if (ch) chN++; }
       else if (vv === 'S') cS++;
     }
+    var floor = cfg.needFloor || cfg.need;
     if (cN !== cfg.need.N) msgs.push('⚠ ' + day4 + '일 N 인원 ' + cN + '명 (필요 ' + cfg.need.N + ')');
-    // 데이/이브닝: 합산 미달분을 S가 메운 만큼 인정. 그래도 모자라면 경고
-    var deShort = Math.max(0, cfg.need.D - cD) + Math.max(0, cfg.need.E - cE);
-    var stillShort = deShort - cS;
-    if (stillShort > 0) msgs.push('⚠ ' + day4 + '일 데이/이브닝 ' + stillShort + '명 부족 (D' + cD + '/E' + cE + (cS ? '/S' + cS : '') + ', 필요 D' + cfg.need.D + '/E' + cfg.need.E + ')');
+    // 데이/이브닝: 필수(floor, 예:2) 미달 = ⚠빨강. S가 메운 분은 인정.
+    var floorShort = Math.max(0, floor.D - cD) + Math.max(0, floor.E - cE) - cS;
+    if (floorShort > 0) msgs.push('⚠ ' + day4 + '일 데이/이브닝 ' + floorShort + '명 부족 (D' + cD + '/E' + cE + (cS ? '/S' + cS : '') + ', 최소 D' + floor.D + '/E' + floor.E + ')');
+    // 목표(3) 미달이지만 floor(2)는 충족 → 정상(2명 운영), 경고 안 함
     if (cD > cfg.need.D) msgs.push('⚠ ' + day4 + '일 D 인원 초과 ' + cD + '명');
     if (cE > cfg.need.E) msgs.push('⚠ ' + day4 + '일 E 인원 초과 ' + cE + '명');
     if (cD > 0 && chD === 0) msgs.push('⚠ ' + day4 + '일 D: 차지 없음');
