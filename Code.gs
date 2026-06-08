@@ -975,6 +975,7 @@ function rebuildNightOffs(cfg, sched, i) {
 function canHostNightBlock(cfg, sched, i, s, e) {
   var nd = cfg.numDays, len = e - s + 1;
   if (s < 1 || e > nd || len < 1 || len > cfg.nightLen) return false;
+  if (len > (cfg.nurses[i].nightMaxLen || cfg.nightLen)) return false; // 사람별 최대연속 존중
   for (var d = s; d <= e; d++) if (sched[i][d] !== '') return false;
   var obn = (len >= cfg.nightLen) ? cfg.offBeforeNight : 0;
   for (var b = 1; b <= obn; b++) {
@@ -1024,7 +1025,8 @@ function enforceFirstOffNight(cfg, sched) {
     if (Y < 0) {
       // 그날 같은 역할 나이트 없음(미달) → 인원 여유 있으면 X가 a부터 새 블록 생성
       if (countShift(sched, a, 'N') < cfg.need.N) {
-        var lens = [3, 2, 1];
+        var mxL = cfg.nurses[X].nightMaxLen || cfg.nightLen; // 사람별 나이트 최대연속 존중
+        var lens = [3, 2, 1].filter(function (L) { return L <= mxL; });
         for (var li = 0; li < lens.length; li++) {
           if (a + lens[li] - 1 <= nd && canHostNightBlock(cfg, sched, X, a, a + lens[li] - 1)) {
             for (var dn = a; dn <= a + lens[li] - 1; dn++) sched[X][dn] = SHIFT.N;
@@ -1263,15 +1265,21 @@ function offAfterFor(cfg, blockLen) {
 function splitNightBlocks(T, rng, maxLen) {
   if (T === 0) return [];
   var mx = maxLen || 3;
+  // 최대길이(보통 3) 블록 "위주" — 단 가끔 2를 섞어 타일링/차지배치 유연성 확보.
   var b = [], r = T;
   while (r > 0) {
     var size;
-    if (r === 1 || mx === 1) size = 1;
-    else if (mx === 2) size = (r >= 2) ? ((rng && rng() < 0.15) ? 1 : 2) : 1; // 최대 2 → 1~2만
-    else if (r === 2) size = (rng && rng() < 0.15) ? 1 : 2;      // 2 남으면 가끔 1+1
-    else { var x = rng ? rng() : 0.7; size = x < 0.15 ? 1 : (x < 0.5 ? 2 : 3); } // 가끔 1, 보통 2~3
-    if (size > r) size = r;
+    if (r <= mx) size = r;
+    else if (mx >= 3 && rng && rng() < 0.3) size = 2; // 30%는 2로 변화 (3연속 위주는 유지)
+    else size = mx;
     b.push(size); r -= size;
+  }
+  // 자투리 1을 피함: 마지막 블록이 1이고 앞 블록이 2 이상이면 둘을 고르게 재분배
+  //  예) [3,1] → [2,2], [2,1] → [2,1](그대로, 합3은 더 못 쪼갬)
+  if (b.length >= 2 && b[b.length - 1] === 1) {
+    var last = b.pop(), prev = b.pop(), tot = prev + last;
+    if (tot >= 4) { b.push(Math.ceil(tot / 2)); b.push(Math.floor(tot / 2)); }
+    else { b.push(prev); b.push(last); } // 합3(2+1)은 그대로
   }
   return b;
 }
@@ -1534,6 +1542,8 @@ function pickWindowNurse(cfg, sched, start, end, winSize, thisNights, sizeCount,
   var N = cfg.nurses.length, pool = [];
   for (var i = 0; i < N; i++) {
     if (requireCharge && !cfg.nurses[i].charge) continue;
+    // 사람별 나이트 최대연속 초과 윈도우는 그 사람에게 배정 안 함 (편혜경·박수진=2)
+    if (winSize > (cfg.nurses[i].nightMaxLen || cfg.nightLen)) continue;
     // 목표 초과 방지 (폴백 땐 무시)
     if (respectTarget && thisNights[i] + winSize > Math.ceil(nightTarget[i])) continue;
     var ok = true;
