@@ -40,6 +40,7 @@ var COLORS = {
   D: '#cfe2f3', // 연파랑
   E: '#fce5cd', // 연주황
   N: '#434b66', // 남색 (글자 흰색)
+  S: '#d9ead3', // 연초록 (추가근무/서포트)
   O: '#efefef', // 회색
   HEADER: '#1f3864',
   WEEKEND: '#fff2cc',
@@ -95,26 +96,28 @@ function setupSheets() {
 
   // 간호사 목록 헤더
   s.getRange(NURSE_START_ROW - 1, 1).setValue('■ 간호사 목록 (역할: 차지 / 액팅)').setFontWeight('bold');
-  var headers = [['이름', '역할', '요청오프(예: 3,10,21)', '듀티개수(예: D:14/N:5/E:0)', '전월 나이트(일)', '선호 듀티', '강도']];
-  s.getRange(NURSE_START_ROW, 1, 1, 7).setValues(headers)
+  var headers = [['이름', '역할', '요청오프(예: 3,10,21)', '듀티개수(예: D:14/N:5/E:0)', '전월 나이트(일)', '선호 듀티', '강도', '나이트최대(빈칸=3)']];
+  s.getRange(NURSE_START_ROW, 1, 1, 8).setValues(headers)
     .setFontWeight('bold').setBackground(COLORS.HEADER).setFontColor('#ffffff');
 
-  // 기본 12명 (차지 6 / 액팅 6) 예시
+  // 기본 11명 (차지 6 / 액팅 5)
   var nurses = [
-    ['간호사1', '차지', '', ''],
-    ['간호사2', '차지', '', ''],
-    ['간호사3', '차지', '', ''],
-    ['간호사4', '차지', '', ''],
-    ['간호사5', '차지', '', ''],
-    ['간호사6', '차지', '', ''],
-    ['간호사7', '액팅', '', ''],
-    ['간호사8', '액팅', '', ''],
-    ['간호사9', '액팅', '', ''],
-    ['간호사10', '액팅', '', ''],
-    ['간호사11', '액팅', '', ''],
-    ['간호사12', '액팅', '', '']
+    ['편혜경', '차지', '21,22', 'D:14/N:5/E:0'],
+    ['이선정', '차지', '14,15', 'N:5'],
+    ['박수진', '차지', '19,20', 'N:5'],
+    ['전초희', '차지', '11,12', 'N:5'],
+    ['김경진', '차지', '7,8', 'N:5'],
+    ['박지연', '차지', '', 'N:5'],
+    ['서문휘정', '액팅', '12,13', 'N:6'],
+    ['이서현', '액팅', '27,28', 'N:6'],
+    ['정선희', '액팅', '', 'N:6'],
+    ['곽예은', '액팅', '14,15', 'N:6'],
+    ['오혜경', '액팅', '', '']
   ];
   s.getRange(NURSE_START_ROW + 1, 1, nurses.length, 4).setValues(nurses);
+  // 나이트 최대연속: 편혜경(1번)·박수진(3번)은 2 (한 번에 1~2개), 나머지는 빈칸=3
+  s.getRange(NURSE_START_ROW + 1, 8).setValue(2);     // 편혜경
+  s.getRange(NURSE_START_ROW + 3, 8).setValue(2);     // 박수진
 
   // 역할 드롭다운
   var roleRule = SpreadsheetApp.newDataValidation()
@@ -138,6 +141,7 @@ function setupSheets() {
   s.setColumnWidth(5, 110);
   s.setColumnWidth(6, 100);
   s.setColumnWidth(7, 70);
+  s.setColumnWidth(8, 120);
 
   // --- 듀티표 시트 ---
   var d = ss.getSheetByName(DUTY_SHEET) || ss.insertSheet(DUTY_SHEET);
@@ -181,13 +185,16 @@ function readSettings() {
   // 간호사 목록 읽기
   var last = s.getLastRow();
   var nurses = [];
-  var vals = s.getRange(NURSE_START_ROW + 1, 1, last - NURSE_START_ROW, 7).getValues();
+  var vals = s.getRange(NURSE_START_ROW + 1, 1, last - NURSE_START_ROW, 8).getValues();
   for (var i = 0; i < vals.length; i++) {
     var name = (vals[i][0] || '').toString().trim();
     if (!name) continue;
     var role = (vals[i][1] || '액팅').toString().trim();
     var prevNightDays = Number(vals[i][4]) || 0;
     var reqOff = parseReqOff(vals[i][2]);
+    var nMax = parseInt(vals[i][7], 10); // 나이트 최대연속 (빈칸/이상 → 기본 nightLen)
+    if (!(nMax >= 1)) nMax = cfg.nightLen;
+    nMax = Math.min(nMax, cfg.nightLen); // 전역 한도(3) 초과는 불가
     nurses.push({
       name: name,
       charge: role === '차지',
@@ -196,7 +203,8 @@ function readSettings() {
       prevNightDays: prevNightDays,
       prevBlocks: Math.round(prevNightDays / (cfg.nightLen || 3)),
       prefShift: parsePref(vals[i][5]), // 선호 듀티 (소프트): '' / 'D' / 'E' / 'N'
-      prefStrength: parsePrefStrength(vals[i][6]) // 강도: 1(약간)/2(보통)/3(강하게)
+      prefStrength: parsePrefStrength(vals[i][6]), // 강도: 1(약간)/2(보통)/3(강하게)
+      nightMaxLen: nMax // 나이트 한 번에 최대 연속 일수 (편혜경·박수진=2)
       // 첫 요청오프 전날 Day 고정은 tryBuild 0-b에서 요청오프+수기입력(O)을 합쳐 계산
     });
   }
@@ -367,9 +375,9 @@ function drawDutyTemplate() {
     d.getRange(base + 2, c).setFormula('=COUNTIF(' + colData + ',"N")');
   }
 
-  // 입력 데이터 검증 (D/E/N/O)
+  // 입력 데이터 검증 (D/E/N/O/S)  — S=추가근무
   var dvRule = SpreadsheetApp.newDataValidation()
-    .requireValueInList(['D', 'E', 'N', 'O'], true).build();
+    .requireValueInList(['D', 'E', 'N', 'O', 'S'], true).build();
   d.getRange(DUTY_DATA_START_ROW, firstDayCol, nN, nd).setDataValidation(dvRule);
 
   // 색상 (조건부 서식)
@@ -423,6 +431,7 @@ function applyShiftColors(sheet, r0, c0, nN, nd) {
   rules.push(rule('D', COLORS.D));
   rules.push(rule('E', COLORS.E));
   rules.push(rule('N', COLORS.N, '#ffffff'));
+  rules.push(rule('S', COLORS.S, '#38761d'));
   rules.push(rule('O', COLORS.O, '#999999'));
   sheet.setConditionalFormatRules(rules);
 }
@@ -706,7 +715,38 @@ function tryBuild(cfg, rng) {
   //    드물게(빡빡한 달) 구성이 못 피하는 1칸을 합법 상태로 만든다.
   repairHardViolations(cfg, sched);
 
+  // 6) S(추가근무): 데이/이브닝 인원이 모자란 날, 그날 쉬는 액팅을 불러 S로 채움(오버타임).
+  //    인원이 충분한 달이면 빈칸이 없어 S도 안 생김.
+  assignSupport(cfg, sched);
+
   return sched;
+}
+
+/* 데이/이브닝 미달분을 그날 오프인 액팅을 S(추가근무)로 호출해 메움.
+   - 액팅만, 요청오프/나이트오프 등 잠긴 칸 보호, N 다음날 금지, 연속근무 한도 준수
+   - 오프 많은 사람 우선(과근 분산). S는 오버타임이라 오프 하한 아래로 내려갈 수 있음(evaluate가 면제) */
+function assignSupport(cfg, sched) {
+  var nd = cfg.numDays, N = cfg.nurses.length;
+  for (var d = 1; d <= nd; d++) {
+    var gap = (cfg.need.D - countShift(sched, d, 'D')) + (cfg.need.E - countShift(sched, d, 'E'));
+    var guard = 0;
+    while (gap > 0 && guard++ < N) {
+      var best = -1, bestOff = -1;
+      for (var i = 0; i < N; i++) {
+        if (cfg.nurses[i].charge) continue;          // 액팅만 S
+        if (sched[i][d] !== 'O') continue;            // 그날 쉬는 사람만 호출
+        if (isLocked(cfg, i, d)) continue;            // 요청오프/나이트 전후오프 보호
+        if (d > 1 && sched[i][d - 1] === 'N') continue; // N 다음날 근무 금지
+        var back = 0; for (var b = d - 1; b >= 1; b--) { var pv = sched[i][b]; if (pv && pv !== 'O') back++; else break; }
+        var fwd = 0; for (var f = d + 1; f <= nd; f++) { var nv = sched[i][f]; if (nv && nv !== 'O') fwd++; else break; }
+        if (back + 1 + fwd > cfg.maxConsec) continue; // 연속근무 한도
+        var o = countOffRow(sched, i, nd);
+        if (o > bestOff) { bestOff = o; best = i; }
+      }
+      if (best < 0) break;
+      sched[best][d] = 'S'; gap--;
+    }
+  }
 }
 
 /* 최종 하드 패턴 위반 제거 — 충돌 근무 칸을 O로 (잠긴/요청/수기 칸은 보존) */
@@ -1179,15 +1219,18 @@ function assignNights(cfg, sched, rng) {
 function offAfterFor(cfg, blockLen) {
   return (blockLen >= cfg.nightLen) ? (cfg.offAfterNight3 || 2) : (cfg.offAfterNight || 1);
 }
-/* 나이트 목표 T를 1~3일 블록으로 분해 (2~3 위주, 가끔 1일 섞음) */
-function splitNightBlocks(T, rng) {
+/* 나이트 목표 T를 블록으로 분해. maxLen: 1블록 최대 길이(사람별, 기본 3) */
+function splitNightBlocks(T, rng, maxLen) {
   if (T === 0) return [];
+  var mx = maxLen || 3;
   var b = [], r = T;
   while (r > 0) {
     var size;
-    if (r === 1) size = 1;
+    if (r === 1 || mx === 1) size = 1;
+    else if (mx === 2) size = (r >= 2) ? ((rng && rng() < 0.15) ? 1 : 2) : 1; // 최대 2 → 1~2만
     else if (r === 2) size = (rng && rng() < 0.15) ? 1 : 2;      // 2 남으면 가끔 1+1
     else { var x = rng ? rng() : 0.7; size = x < 0.15 ? 1 : (x < 0.5 ? 2 : 3); } // 가끔 1, 보통 2~3
+    if (size > r) size = r;
     b.push(size); r -= size;
   }
   return b;
@@ -1237,7 +1280,7 @@ function roleNightCounts(cfg, idxs, total) {
 
 /* 한 역할(차지 또는 액팅)이 nd일을 1인 1명씩 덮도록 2~3블록 타일링 → owner[1..nd] (실패 시 null)
    counts: idxs와 같은 길이의 1인당 나이트 수(합=nd). 없으면 균등 분배. */
-function tileNightRole(nd, idxs, rng, counts) {
+function tileNightRole(nd, idxs, rng, counts, cfg) {
   var count = idxs.length;
   if (count === 0) return null;
   var base = Math.floor(nd / count), extra = nd % count;
@@ -1245,7 +1288,8 @@ function tileNightRole(nd, idxs, rng, counts) {
   var queues = [];
   for (var k = 0; k < count; k++) {
     var nightsK = counts ? counts[idxs.indexOf(order[k])] : (base + (k < extra ? 1 : 0));
-    var sizes = splitNightBlocks(nightsK, rng);
+    var mxLen = (cfg && cfg.nurses[order[k]]) ? cfg.nurses[order[k]].nightMaxLen : 3;
+    var sizes = splitNightBlocks(nightsK, rng, mxLen);
     if (sizes === null) return null;
     queues.push({ nurse: order[k], sizes: sizes });
   }
@@ -1326,8 +1370,8 @@ function constructNights(cfg, sched, rng) {
   // 정확 구성(차지1+액팅1, 위반 0) 성공률을 끌어올린다. (요청 없으면 보통 1회에 통과)
   var co = null, ao = null, found = false;
   for (var retry = 0; retry < 30 && !found; retry++) {
-    co = tileNightRole(nd, charges, rng, cCounts);
-    ao = tileNightRole(nd, actings, rng, aCounts);
+    co = tileNightRole(nd, charges, rng, cCounts, cfg);
+    ao = tileNightRole(nd, actings, rng, aCounts, cfg);
     if (co && ao && tilingValid(co, ao)) found = true;
   }
   if (!found) return false;
@@ -1665,12 +1709,18 @@ function evaluate(cfg, sched) {
   var unfilled = 0, hard = 0, offDev = 0, overStaff = 0;
 
   for (var day = 1; day <= nd; day++) {
+    // N은 정확 인원, D/E는 합산 미달분에서 S(추가근무)가 메운 만큼 차감
+    var ndiff = cfg.need.N - countShift(sched, day, 'N');
+    if (ndiff > 0) unfilled += ndiff; if (ndiff < 0) overStaff += (-ndiff);
+    var deDef = Math.max(0, cfg.need.D - countShift(sched, day, 'D')) +
+                Math.max(0, cfg.need.E - countShift(sched, day, 'E'));
+    var sCnt = countShift(sched, day, 'S');
+    unfilled += Math.max(0, deDef - sCnt);         // S가 메운 D/E 미달은 빈칸으로 안 셈
+    overStaff += Math.max(0, sCnt - deDef);        // 미달도 아닌데 S가 남으면 초과로 취급
+    overStaff += Math.max(0, (countShift(sched, day, 'D') - cfg.need.D)) +
+                 Math.max(0, (countShift(sched, day, 'E') - cfg.need.E));
     WORK_SHIFTS.forEach(function (sh) {
-      var diff = cfg.need[sh] - countShift(sched, day, sh);
-      if (diff > 0) unfilled += diff;
-      if (diff < 0) overStaff += (-diff); // 인원 초과(예: Day 4명)도 위반 → 검색이 회피하도록
-      // 차지 없는 근무
-      if (countShift(sched, day, sh) > 0 && !shiftHasCharge(cfg, sched, day, sh)) hard++;
+      if (countShift(sched, day, sh) > 0 && !shiftHasCharge(cfg, sched, day, sh)) hard++; // 차지 없는 근무
     });
   }
   var nightDev = 0;
@@ -1680,10 +1730,12 @@ function evaluate(cfg, sched) {
   var consecOffViol = 0; // 연속오프 한도(차지3/액팅2) 초과 — 탐색이 이런 배치를 피하게 함
   var dutyMiss = 0; // 듀티 개수 목표(예: D:14/N:5/E:0)와의 차이 합 — 적을수록 목표 충족
   var patViol = 0; // 하드 패턴 위반: N다음D/E, E다음D, 연속근무 초과, 나이트 전후 필수오프 미충족
+  var nightLenViol = 0; // 사람별 나이트 최대연속 초과(편혜경·박수진 등)
   for (var i = 0; i < N; i++) {
-    var off = 0, nights = 0, work = 0, matchPref = 0, cntD = 0, cntE = 0;
+    var off = 0, nights = 0, work = 0, matchPref = 0, cntD = 0, cntE = 0, sCount = 0;
     var pref = cfg.nurses[i].prefShift;
     var maxCO = cfg.nurses[i].charge ? (cfg.maxConsecOffCharge || 3) : (cfg.maxConsecOffActing || 2);
+    var nMaxL = cfg.nurses[i].nightMaxLen || cfg.nightLen;
     var offRun = 0, workRun = 0;
     for (var d = 1; d <= nd; d++) {
       var v = sched[i][d], pvd = (d > 1) ? sched[i][d - 1] : '';
@@ -1692,11 +1744,11 @@ function evaluate(cfg, sched) {
         offRun++; if (offRun > maxCO) consecOffViol++;
       }
       else {
-        work++; offRun = 0; workRun++;
+        work++; offRun = 0; workRun++;          // S도 근무로 카운트(연속근무에 포함)
         if (workRun > cfg.maxConsec) patViol++;                 // 연속근무 초과
-        if ((v === 'D' || v === 'E') && pvd === 'N') patViol++; // N 다음날 D/E 금지
+        if ((v === 'D' || v === 'E' || v === 'S') && pvd === 'N') patViol++; // N 다음날 주간/S 금지
         if (v === 'D' && pvd === 'E') patViol++;                // E 다음날 D 금지
-        if (v === 'N') nights++; else if (v === 'D') cntD++; else if (v === 'E') cntE++;
+        if (v === 'N') nights++; else if (v === 'D') cntD++; else if (v === 'E') cntE++; else if (v === 'S') sCount++;
         if (pref && v === pref) matchPref++;
       }
     }
@@ -1705,15 +1757,18 @@ function evaluate(cfg, sched) {
       if (sched[i][nb] === 'N' && sched[i][nb - 1] !== 'N') {
         var blen = 0; while (sched[i][nb + blen] === 'N') blen++;
         var bend = nb + blen - 1;
-        if (blen > cfg.nightLen && bend < nd) patViol++;        // 나이트 연속 초과
+        if (blen > cfg.nightLen && bend < nd) patViol++;        // 나이트 연속 초과(전역)
+        if (blen > nMaxL && bend < nd) nightLenViol += (blen - nMaxL); // 사람별 최대연속 초과
         var ob2 = (blen >= cfg.nightLen) ? cfg.offBeforeNight : 0;
         for (var bx = 1; bx <= ob2; bx++) { var bdd = nb - bx; if (bdd >= 1 && sched[i][bdd] !== 'O' && sched[i][bdd] !== '') patViol++; }
         var oa2 = offAfterFor(cfg, blen);
         for (var ax = 1; ax <= oa2; ax++) { var add = bend + ax; if (add <= nd && sched[i][add] !== 'O' && sched[i][add] !== '') patViol++; }
       }
     }
-    if (off < cfg.offMin) offDev += (cfg.offMin - off);
-    if (off > cfg.offMax) offDev += (off - cfg.offMax);
+    // S(추가근무)는 오프를 깎는 오버타임 → 오프 하한 벌점에서 제외(off에 S만큼 되돌려 계산)
+    var effOff = off + sCount;
+    if (effOff < cfg.offMin) offDev += (cfg.offMin - effOff);
+    if (effOff > cfg.offMax) offDev += (effOff - cfg.offMax);
     // 듀티 개수 목표: 지정된 듀티마다 |목표-실제| 누적
     var dc = cfg.nurses[i].dutyCount;
     if (dc) {
@@ -1749,11 +1804,12 @@ function evaluate(cfg, sched) {
   }
   return {
     unfilled: unfilled, hard: hard, offDev: offDev, overStaff: overStaff, consecOffViol: consecOffViol,
-    patViol: patViol, nightDev: Math.round(nightDev), roleViol: roleViol, prefMiss: prefMiss, donMiss: donMiss, dutyMiss: dutyMiss,
-    // 하드 패턴(patViol: N다음D/E, E다음D, 연속근무, 나이트 전후오프)은 절대 위반 불가 →
-    // 커버리지·오프와 함께 최상위 가중. 듀티개수·선호는 그 안에서만 best 선택을 좌우.
+    patViol: patViol, nightLenViol: nightLenViol, nightDev: Math.round(nightDev), roleViol: roleViol,
+    prefMiss: prefMiss, donMiss: donMiss, dutyMiss: dutyMiss,
+    // 하드 패턴(patViol)은 절대 위반 불가 → 커버리지·오프와 함께 최상위 가중.
+    // 사람별 나이트최대(nightLenViol)·듀티개수·선호는 그 안에서만 best 선택을 좌우.
     total: patViol * 120 + unfilled * 100 + overStaff * 60 + hard * 80 + offDev * 30 + consecOffViol * 25 +
-      donMiss * 50 + dutyMiss * 12 + nightDev * 6 + roleViol * 10 + prefMiss
+      donMiss * 50 + nightLenViol * 20 + dutyMiss * 12 + nightDev * 6 + roleViol * 10 + prefMiss
   };
 }
 
@@ -1801,11 +1857,10 @@ function checkRules() {
     var streak = 0;
     for (var day = 1; day <= nd; day++) {
       var cur = get(ii, day), prev = get(ii, day - 1);
-      var isWork = (cur === 'D' || cur === 'E' || cur === 'N');
+      var isWork = (cur === 'D' || cur === 'E' || cur === 'N' || cur === 'S');
       streak = isWork ? streak + 1 : 0;
       if (streak > cfg.maxConsec) flag(ii, day, '연속근무 ' + streak + '일 (최대 ' + cfg.maxConsec + ')');
-      if (cur === 'D' && prev === 'N') flag(ii, day, 'N 다음날 D 금지');
-      if (cur === 'E' && prev === 'N') flag(ii, day, 'N 다음날 E 금지');
+      if ((cur === 'D' || cur === 'E' || cur === 'S') && prev === 'N') flag(ii, day, 'N 다음날 ' + cur + ' 금지');
       if (cur === 'D' && prev === 'E') flag(ii, day, 'E 다음날 D 금지');
     }
     // 나이트 블록 길이 & 전후 오프
@@ -1831,11 +1886,12 @@ function checkRules() {
         }
       }
     }
-    // 월 오프 수
-    var off = 0;
-    for (var day3 = 1; day3 <= nd; day3++) if (get(ii, day3) === 'O') off++;
-    if (off < cfg.offMin || off > cfg.offMax)
-      msgs.push('⚠ ' + cfg.nurses[ii].name + ': 오프 ' + off + '개 (목표 ' + cfg.offMin + '~' + cfg.offMax + ')');
+    // 월 오프 수 (S=추가근무는 오버타임이라 오프에 되돌려 계산 → 명목 오프 기준)
+    var off = 0, sDays = 0;
+    for (var day3 = 1; day3 <= nd; day3++) { var gv = get(ii, day3); if (gv === 'O') off++; else if (gv === 'S') sDays++; }
+    var effOff = off + sDays;
+    if (effOff < cfg.offMin || effOff > cfg.offMax)
+      msgs.push('⚠ ' + cfg.nurses[ii].name + ': 오프 ' + off + '개' + (sDays ? ('+추가근무 ' + sDays) : '') + ' (목표 ' + cfg.offMin + '~' + cfg.offMax + ')');
     // 연속 오프 최대 (차지 3 / 액팅 2)
     var maxC = cfg.nurses[ii].charge ? (cfg.maxConsecOffCharge || 3) : (cfg.maxConsecOffActing || 2);
     var orun = 0;
@@ -1847,18 +1903,26 @@ function checkRules() {
     }
   }
 
-  // 일별 인원 / 차지 검사
+  // 일별 인원 / 차지 검사 — N은 정확 인원, D/E는 S(추가근무)가 메운 분 인정
   for (var day4 = 1; day4 <= nd; day4++) {
-    WORK_SHIFTS.forEach(function (sh) {
-      var cnt = 0, charge = 0;
-      for (var i = 0; i < N; i++) {
-        if (data[i][day4 - 1] === sh) { cnt++; if (cfg.nurses[i].charge) charge++; }
-      }
-      if (cnt !== cfg.need[sh])
-        msgs.push('⚠ ' + day4 + '일 ' + sh + ' 인원 ' + cnt + '명 (필요 ' + cfg.need[sh] + ')');
-      if (cnt > 0 && charge === 0)
-        msgs.push('⚠ ' + day4 + '일 ' + sh + ': 차지 없음 (액팅만 근무)');
-    });
+    var cD = 0, cE = 0, cN = 0, cS = 0, chD = 0, chE = 0, chN = 0;
+    for (var i = 0; i < N; i++) {
+      var vv = data[i][day4 - 1], ch = cfg.nurses[i].charge;
+      if (vv === 'D') { cD++; if (ch) chD++; }
+      else if (vv === 'E') { cE++; if (ch) chE++; }
+      else if (vv === 'N') { cN++; if (ch) chN++; }
+      else if (vv === 'S') cS++;
+    }
+    if (cN !== cfg.need.N) msgs.push('⚠ ' + day4 + '일 N 인원 ' + cN + '명 (필요 ' + cfg.need.N + ')');
+    // 데이/이브닝: 합산 미달분을 S가 메운 만큼 인정. 그래도 모자라면 경고
+    var deShort = Math.max(0, cfg.need.D - cD) + Math.max(0, cfg.need.E - cE);
+    var stillShort = deShort - cS;
+    if (stillShort > 0) msgs.push('⚠ ' + day4 + '일 데이/이브닝 ' + stillShort + '명 부족 (D' + cD + '/E' + cE + (cS ? '/S' + cS : '') + ', 필요 D' + cfg.need.D + '/E' + cfg.need.E + ')');
+    if (cD > cfg.need.D) msgs.push('⚠ ' + day4 + '일 D 인원 초과 ' + cD + '명');
+    if (cE > cfg.need.E) msgs.push('⚠ ' + day4 + '일 E 인원 초과 ' + cE + '명');
+    if (cD > 0 && chD === 0) msgs.push('⚠ ' + day4 + '일 D: 차지 없음');
+    if (cE > 0 && chE === 0) msgs.push('⚠ ' + day4 + '일 E: 차지 없음');
+    if (cN > 0 && chN === 0) msgs.push('⚠ ' + day4 + '일 N: 차지 없음');
   }
 
   // 배경색 일괄 적용
