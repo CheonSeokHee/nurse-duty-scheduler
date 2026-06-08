@@ -77,8 +77,8 @@ function setupSheets() {
     ['연도', new Date().getFullYear()],
     ['월', new Date().getMonth() + 1],
     ['', ''],
-    ['Day 필요인원', 3],
-    ['Evening 필요인원', 3],
+    ['Day 필요인원', 2],
+    ['Evening 필요인원', 2],
     ['Night 필요인원', 2],
     ['', ''],
     ['최대 연속근무(일)', 4],
@@ -181,9 +181,8 @@ function readSettings() {
     offMax: num(16),
     attempts: num(17) || 300
   };
-  // 필수 인원(floor): 이 밑으로 떨어지면 "빨강(미달)". D/E는 목표-1(예: 3→2)까지 허용,
-  // 나머지 3번째는 S(오프 여유 액팅)로 채움. N은 정확(완화 없음).
-  cfg.needFloor = { D: Math.max(1, cfg.need.D - 1), E: Math.max(1, cfg.need.E - 1), N: cfg.need.N };
+  // 필수 인원(floor) = 정규 인원(need). 이 밑으로 떨어지면 "빨강(미달)".
+  cfg.needFloor = { D: cfg.need.D, E: cfg.need.E, N: cfg.need.N };
 
   // 간호사 목록 읽기
   var last = s.getLastRow();
@@ -213,6 +212,11 @@ function readSettings() {
   }
   cfg.nurses = nurses;
   cfg.numDays = new Date(cfg.year, cfg.month, 0).getDate();
+  // 인원 과잉(surplus) 모드: 정규 근무(D+E+N)가 적어 다들 오프가 너무 많아지는 구성.
+  //  → 차지는 D/E를 우선 채워 오프를 맞추고, 남는 액팅은 S(보조근무)로 돌려 오프 10~11 유지.
+  var coreWork = (cfg.need.D + cfg.need.E + cfg.need.N) * cfg.numDays;
+  var minTotalWork = cfg.nurses.length * (cfg.numDays - cfg.offMax);
+  cfg.surplus = coreWork < minTotalWork;
   return cfg;
 }
 
@@ -718,11 +722,36 @@ function tryBuild(cfg, rng) {
   //    드물게(빡빡한 달) 구성이 못 피하는 1칸을 합법 상태로 만든다.
   repairHardViolations(cfg, sched);
 
-  // 6) S(추가근무): 데이/이브닝 인원이 모자란 날, 그날 쉬는 액팅을 불러 S로 채움(오버타임).
-  //    인원이 충분한 달이면 빈칸이 없어 S도 안 생김.
+  // 6) 인원 과잉 모드: 남는 액팅을 S(보조근무)로 → 오프 10~11 맞춤.
   assignSupport(cfg, sched);
+  // 6-b) D/E 초과(3번째)가 생겼으면 그 액팅을 S로 relabel → 데이/이브닝 정확히 2 유지.
+  convertOverstaffToS(cfg, sched);
 
   return sched;
+}
+
+/* 인원 과잉 모드에서 D/E가 정규(need)를 넘으면, 초과한 액팅을 S로 바꿔 D/E를 need로 맞춤.
+   (S는 별도 보조근무 — 사람은 그대로 근무, 라벨만 D/E→S. 차지·잠금·요청은 안 건드림) */
+function convertOverstaffToS(cfg, sched) {
+  if (!cfg.surplus) return;
+  var nd = cfg.numDays, N = cfg.nurses.length;
+  ['D', 'E'].forEach(function (sh) {
+    for (var d = 1; d <= nd; d++) {
+      var guard = 0;
+      while (countShift(sched, d, sh) > cfg.need[sh] && guard++ < N) {
+        var pick = -1, pickDuty = -1;
+        for (var i = 0; i < N; i++) {
+          if (sched[i][d] !== sh) continue;
+          if (cfg.nurses[i].charge) continue;          // 액팅만 S
+          if (isLocked(cfg, i, d)) continue;            // 요청/수기 보호
+          var hasDuty = cfg.nurses[i].dutyCount && cfg.nurses[i].dutyCount[sh] != null;
+          if (pick < 0 || (!hasDuty && pickDuty === 1)) { pick = i; pickDuty = hasDuty ? 1 : 0; if (!hasDuty) break; }
+        }
+        if (pick < 0) break;                            // 초과인데 다 차지/잠금이면 둠
+        sched[pick][d] = 'S';
+      }
+    }
+  });
 }
 
 /* 목표 인원(데이3/이브닝3)에서 모자란 "3번째"를 S(액팅 추가근무)로 채움.
@@ -737,42 +766,25 @@ function assignSupport(cfg, sched) {
     var fwd = 0; for (var f = d + 1; f <= nd; f++) { var nv = sched[i][f]; if (nv && nv !== 'O') fwd++; else break; }
     return back + 1 + fwd <= cfg.maxConsec;
   }
-  function canCallS(i, d) { // 액팅·미잠금·N다음날아님·연속OK·오프여유
-    return !cfg.nurses[i].charge && !isLocked(cfg, i, d) && !(d > 1 && sched[i][d - 1] === 'N') &&
-      consecOK(i, d) && countOffRow(sched, i, nd) > cfg.offMin;
+  // S 놓을 수 있는 칸? 그날 오프 + 미잠금 + N다음날 아님 + 연속근무 OK
+  function canPlaceS(i, d) {
+    return sched[i][d] === 'O' && !isLocked(cfg, i, d) &&
+      !(d > 1 && sched[i][d - 1] === 'N') && consecOK(i, d);
   }
-  for (var d = 1; d <= nd; d++) {
-    var gap = (cfg.need.D - countShift(sched, d, 'D')) + (cfg.need.E - countShift(sched, d, 'E'));
+  // 액팅이 오프 과다(off > offMax)면, 쉬는 날을 S(보조근무)로 돌려 오프를 offMax까지 내림.
+  //   놓는 날은 그날 인원(D+E+S)이 적은 날 우선 → 보조가 필요한 날에 S가 가도록.
+  for (var i = 0; i < N; i++) {
+    if (cfg.nurses[i].charge) continue;            // S는 액팅만
     var guard = 0;
-    while (gap > 0 && guard++ < N * 2) {
-      // ① 그날 쉬는 '오프 여유' 액팅을 바로 S로 (오프 많은 사람 우선 → 과근 분산)
-      var best = -1, bestOff = -1;
-      for (var i = 0; i < N; i++) {
-        if (sched[i][d] !== 'O') continue;
-        if (!canCallS(i, d)) continue;
-        var o = countOffRow(sched, i, nd);
-        if (o > bestOff) { bestOff = o; best = i; }
+    while (countOffRow(sched, i, nd) > cfg.offMax && guard++ < nd) {
+      var bestD = -1, bestLoad = 1e9;
+      for (var d = 1; d <= nd; d++) {
+        if (!canPlaceS(i, d)) continue;
+        var load = countShift(sched, d, 'D') + countShift(sched, d, 'E') + countShift(sched, d, 'S');
+        if (load < bestLoad) { bestLoad = load; bestD = d; }
       }
-      if (best >= 0) { sched[best][d] = 'S'; gap--; continue; }
-      // ② 쉬는 여유 액팅이 없으면: 일하는 액팅 B를 S로, 빈자리를 '오프 여유' 차지 C가 메움
-      var done = false;
-      for (var B = 0; B < N && !done; B++) {
-        if (cfg.nurses[B].charge) continue;
-        var sh = sched[B][d];
-        if (sh !== 'D' && sh !== 'E') continue;
-        if (isLocked(cfg, B, d)) continue;
-        for (var C = 0; C < N && !done; C++) {
-          if (!cfg.nurses[C].charge) continue;
-          if (sched[C][d] !== 'O') continue;
-          if (isLocked(cfg, C, d)) continue;
-          if (countOffRow(sched, C, nd) <= cfg.offMin) continue; // 차지도 오프 여유 있을 때만
-          var saveB = sched[B][d], saveC = sched[C][d];
-          sched[C][d] = sh; sched[B][d] = 'S';
-          if (canWork(cfg, sched, C, d, sh)) { gap--; done = true; }
-          else { sched[B][d] = saveB; sched[C][d] = saveC; }
-        }
-      }
-      if (!done) break; // 더 부를 여유 인원 없음 → 2명으로 운영(빨강 아님)
+      if (bestD < 0) break;
+      sched[i][bestD] = 'S';
     }
   }
 }
@@ -1659,6 +1671,11 @@ function pickDayCandidate(cfg, sched, day, shift, requireCharge, rng) {
     // 듀티 개수 지정은 명시적 지시 → 근무량 균형보다 우선 (목표 도달 시 자동으로 후순위 전환)
     var da = (dr[a] !== undefined) ? dr[a] : 1, db = (dr[b] !== undefined) ? dr[b] : 1;
     if (da !== db) return da - db;
+    // 인원 과잉 모드: 차지를 D/E에 먼저 채움 (차지는 S를 못 하니 정규근무로 오프를 맞춰야 함)
+    if (cfg.surplus) {
+      var ca = cfg.nurses[a].charge ? 0 : 1, cb = cfg.nurses[b].charge ? 0 : 1;
+      if (ca !== cb) return ca - cb;
+    }
     var diff = fullWorkload(sched, a, cfg.numDays) - fullWorkload(sched, b, cfg.numDays);
     if (diff !== 0) return diff;
     var pa = rankOf(a), pb = rankOf(b);
@@ -1740,20 +1757,9 @@ function evaluate(cfg, sched) {
   for (var day = 1; day <= nd; day++) {
     var cntD = countShift(sched, day, 'D'), cntE = countShift(sched, day, 'E');
     var cntN = countShift(sched, day, 'N'), sCnt = countShift(sched, day, 'S');
-    // N은 정확 인원
-    var ndiff = cfg.need.N - cntN;
-    if (ndiff > 0) unfilled += ndiff; if (ndiff < 0) overStaff += (-ndiff);
-    // D/E: 필수(floor) 미달 = 빨강(unfilled). 목표(need)까지의 3번째는 S로 채우면 인정,
-    //      못 채워도 빨강 아님(targetMiss=가벼운 벌점). S는 floor 채운 뒤 목표 보전에만 인정.
-    var floorDef = Math.max(0, floor.D - cntD) + Math.max(0, floor.E - cntE);
-    var sForFloor = Math.min(sCnt, floorDef);
-    unfilled += Math.max(0, floorDef - sCnt);      // floor 미달을 S로도 못 메우면 빨강
-    var sLeft = sCnt - sForFloor;                   // floor 채우고 남은 S
-    var targetDef = Math.max(0, cfg.need.D - Math.max(cntD, floor.D)) +
-                    Math.max(0, cfg.need.E - Math.max(cntE, floor.E));
-    targetMiss += Math.max(0, targetDef - sLeft);   // 3번째 미충족(가벼움). S가 메우면 0
-    overStaff += Math.max(0, sLeft - targetDef);    // 목표도 넘겨 남는 S = 초과
-    overStaff += Math.max(0, cntD - cfg.need.D) + Math.max(0, cntE - cfg.need.E);
+    // 미달(빨강) = floor(=need) 밑 / 초과 = need 위. N·D·E 동일. S는 별도 보조근무라 커버리지에 안 셈.
+    unfilled += Math.max(0, floor.N - cntN) + Math.max(0, floor.D - cntD) + Math.max(0, floor.E - cntE);
+    overStaff += Math.max(0, cntN - cfg.need.N) + Math.max(0, cntD - cfg.need.D) + Math.max(0, cntE - cfg.need.E);
     WORK_SHIFTS.forEach(function (sh) {
       if (countShift(sched, day, sh) > 0 && !shiftHasCharge(cfg, sched, day, sh)) hard++; // 차지 없는 근무
     });
@@ -1800,10 +1806,9 @@ function evaluate(cfg, sched) {
         for (var ax = 1; ax <= oa2; ax++) { var add = bend + ax; if (add <= nd && sched[i][add] !== 'O' && sched[i][add] !== '') patViol++; }
       }
     }
-    // S(추가근무)는 오프를 깎는 오버타임 → 오프 하한 벌점에서 제외(off에 S만큼 되돌려 계산)
-    var effOff = off + sCount;
-    if (effOff < cfg.offMin) offDev += (cfg.offMin - effOff);
-    if (effOff > cfg.offMax) offDev += (effOff - cfg.offMax);
+    // S도 정규 근무로 카운트 → 오프(=O일 수)가 10~11에 들도록. (S는 남는 인원을 쓰는 보조근무)
+    if (off < cfg.offMin) offDev += (cfg.offMin - off);
+    if (off > cfg.offMax) offDev += (off - cfg.offMax);
     // 듀티 개수 목표: 지정된 듀티마다 |목표-실제| 누적
     var dc = cfg.nurses[i].dutyCount;
     if (dc) {
@@ -1921,12 +1926,11 @@ function checkRules() {
         }
       }
     }
-    // 월 오프 수 (S=추가근무는 오버타임이라 오프에 되돌려 계산 → 명목 오프 기준)
+    // 월 오프 수 (S는 정규 근무로 카운트 → 오프는 'O'인 날만)
     var off = 0, sDays = 0;
     for (var day3 = 1; day3 <= nd; day3++) { var gv = get(ii, day3); if (gv === 'O') off++; else if (gv === 'S') sDays++; }
-    var effOff = off + sDays;
-    if (effOff < cfg.offMin || effOff > cfg.offMax)
-      msgs.push('⚠ ' + cfg.nurses[ii].name + ': 오프 ' + off + '개' + (sDays ? ('+추가근무 ' + sDays) : '') + ' (목표 ' + cfg.offMin + '~' + cfg.offMax + ')');
+    if (off < cfg.offMin || off > cfg.offMax)
+      msgs.push('⚠ ' + cfg.nurses[ii].name + ': 오프 ' + off + '개' + (sDays ? ('(+S근무 ' + sDays + ')') : '') + ' (목표 ' + cfg.offMin + '~' + cfg.offMax + ')');
     // 연속 오프 최대 (차지 3 / 액팅 2)
     var maxC = cfg.nurses[ii].charge ? (cfg.maxConsecOffCharge || 3) : (cfg.maxConsecOffActing || 2);
     var orun = 0;
