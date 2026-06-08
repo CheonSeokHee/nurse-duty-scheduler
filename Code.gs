@@ -691,6 +691,8 @@ function tryBuild(cfg, rng) {
 
   // 1) 나이트 블록 배정
   assignNights(cfg, sched, rng);
+  // 1-a) 나이트 개수 맞추기: 같은 역할 내 과다↔과소 스왑으로 dutyCount.N 정확히 (슬랙0 보정)
+  fixNightCounts(cfg, sched);
 
   // 1-b) 첫 리퀘스트 오프 다음날 = 나이트 강제 (같은 역할 블록 스왑 → 구성·인원 유지)
   enforceFirstOffNight(cfg, sched);
@@ -929,6 +931,53 @@ function lockNightOff(cfg, i, day) {
   if (!cfg.nightOffLock) cfg.nightOffLock = [];
   if (!cfg.nightOffLock[i]) cfg.nightOffLock[i] = {};
   cfg.nightOffLock[i][day] = true;
+}
+
+/* i의 나이트 배치가 규칙 OK인지 (블록 길이 ≤ 사람별/전역 최대, N 다음날 근무 없음) */
+function nightArrangementOK(cfg, sched, i) {
+  var nd = cfg.numDays, mx = cfg.nurses[i].nightMaxLen || cfg.nightLen;
+  for (var d = 1; d <= nd; d++) {
+    if (sched[i][d] === 'N' && sched[i][d - 1] !== 'N') {
+      var len = 0; while (sched[i][d + len] === 'N') len++;
+      if (len > mx || len > cfg.nightLen) return false;
+    }
+    if ((sched[i][d] === 'D' || sched[i][d] === 'E' || sched[i][d] === 'S') && sched[i][d - 1] === 'N') return false;
+  }
+  return true;
+}
+
+/* 나이트 개수를 dutyCount.N에 정확히 맞춤 — 같은 역할 내에서 과다자의 나이트 1일을
+   과소자에게 넘김(그날 N 인원수 불변: 같은 역할 1명 교체). 요청N/수기/잠금은 보호. */
+function fixNightCounts(cfg, sched) {
+  var nd = cfg.numDays, N = cfg.nurses.length;
+  function nightsOf(i) { var c = 0; for (var d = 1; d <= nd; d++) if (sched[i][d] === 'N') c++; return c; }
+  function tgt(i) { var dc = cfg.nurses[i].dutyCount; return (dc && dc.N != null) ? dc.N : null; }
+  [true, false].forEach(function (role) {
+    var mem = [];
+    for (var i = 0; i < N; i++) if (cfg.nurses[i].charge === role && tgt(i) != null) mem.push(i);
+    if (!mem.length) return;
+    for (var pass = 0; pass < nd * 2; pass++) {
+      var over = -1, under = -1;
+      for (var k = 0; k < mem.length; k++) {
+        var m = mem[k], n = nightsOf(m);
+        if (n > tgt(m) && over < 0) over = m;
+        if (n < tgt(m) && under < 0) under = m;
+      }
+      if (over < 0 || under < 0) break;
+      var moved = false;
+      for (var d = 1; d <= nd && !moved; d++) {
+        if (sched[over][d] !== 'N' || isLocked(cfg, over, d)) continue;
+        var uv = sched[under][d];
+        if ((uv !== '' && uv !== 'O') || isLocked(cfg, under, d)) continue;
+        var so = sched[over][d], su = sched[under][d];
+        sched[over][d] = ''; sched[under][d] = 'N';
+        rebuildNightOffs(cfg, sched, over); rebuildNightOffs(cfg, sched, under);
+        if (nightArrangementOK(cfg, sched, over) && nightArrangementOK(cfg, sched, under)) moved = true;
+        else { sched[over][d] = so; sched[under][d] = su; rebuildNightOffs(cfg, sched, over); rebuildNightOffs(cfg, sched, under); }
+      }
+      if (!moved) break;
+    }
+  });
 }
 
 /* i의 나이트 블록 목록 [{s,e,len}] */
@@ -1261,25 +1310,18 @@ function assignNights(cfg, sched, rng) {
 function offAfterFor(cfg, blockLen) {
   return (blockLen >= cfg.nightLen) ? (cfg.offAfterNight3 || 2) : (cfg.offAfterNight || 1);
 }
-/* 나이트 목표 T를 블록으로 분해. maxLen: 1블록 최대 길이(사람별, 기본 3) */
+/* 나이트 목표 T를 블록으로 분해. 1·2·3일 자유롭게 섞음(개수 합은 정확히 T).
+   maxLen: 1블록 최대 길이(사람별, 기본 3 / 편혜경·박수진=2) */
 function splitNightBlocks(T, rng, maxLen) {
   if (T === 0) return [];
   var mx = maxLen || 3;
-  // 최대길이(보통 3) 블록 "위주" — 단 가끔 2를 섞어 타일링/차지배치 유연성 확보.
   var b = [], r = T;
   while (r > 0) {
     var size;
-    if (r <= mx) size = r;
-    else if (mx >= 3 && rng && rng() < 0.3) size = 2; // 30%는 2로 변화 (3연속 위주는 유지)
-    else size = mx;
+    if (r <= mx) size = r;                                   // 남은 게 한 블록에 들어가면 그대로
+    else if (mx <= 2) size = mx;                             // 최대 2면 2씩
+    else { var x = rng ? rng() : 0.6; size = x < 0.2 ? 1 : (x < 0.55 ? 2 : 3); } // 1·2·3 골고루
     b.push(size); r -= size;
-  }
-  // 자투리 1을 피함: 마지막 블록이 1이고 앞 블록이 2 이상이면 둘을 고르게 재분배
-  //  예) [3,1] → [2,2], [2,1] → [2,1](그대로, 합3은 더 못 쪼갬)
-  if (b.length >= 2 && b[b.length - 1] === 1) {
-    var last = b.pop(), prev = b.pop(), tot = prev + last;
-    if (tot >= 4) { b.push(Math.ceil(tot / 2)); b.push(Math.floor(tot / 2)); }
-    else { b.push(prev); b.push(last); } // 합3(2+1)은 그대로
   }
   return b;
 }
@@ -1417,7 +1459,7 @@ function constructNights(cfg, sched, rng) {
   // 요청/수기입력이 많은 달은 무충돌 타일링이 드물다 → attempt 안에서 여러 번 재추첨해
   // 정확 구성(차지1+액팅1, 위반 0) 성공률을 끌어올린다. (요청 없으면 보통 1회에 통과)
   var co = null, ao = null, found = false;
-  for (var retry = 0; retry < 30 && !found; retry++) {
+  for (var retry = 0; retry < 80 && !found; retry++) {
     co = tileNightRole(nd, charges, rng, cCounts, cfg);
     ao = tileNightRole(nd, actings, rng, aCounts, cfg);
     if (co && ao && tilingValid(co, ao)) found = true;
@@ -1859,7 +1901,7 @@ function evaluate(cfg, sched) {
     // 하드 패턴·필수인원(floor)·오프는 최상위 가중. 3번째 데이/이브닝(targetMiss)은
     // "있으면 좋은" 가벼운 벌점 — S/여유로 채우되 못 채워도 빨강 아님.
     total: patViol * 120 + unfilled * 100 + overStaff * 60 + hard * 80 + offDev * 30 + consecOffViol * 25 +
-      donMiss * 50 + nightLenViol * 20 + dutyMiss * 12 + targetMiss * 8 + nightDev * 6 + roleViol * 10 + prefMiss
+      donMiss * 50 + dutyMiss * 45 + nightLenViol * 20 + targetMiss * 8 + nightDev * 6 + roleViol * 10 + prefMiss
   };
 }
 
