@@ -727,24 +727,48 @@ function tryBuild(cfg, rng) {
    - 오프 많은 사람 우선(과근 분산). S는 오버타임이라 오프 하한 아래로 내려갈 수 있음(evaluate가 면제) */
 function assignSupport(cfg, sched) {
   var nd = cfg.numDays, N = cfg.nurses.length;
+  // 그날 i를 S로 부를 수 있나 (액팅·미잠금·N다음날아님·연속근무 OK)
+  function canCallS(i, d) {
+    if (cfg.nurses[i].charge) return false;
+    if (isLocked(cfg, i, d)) return false;
+    if (d > 1 && sched[i][d - 1] === 'N') return false;
+    var back = 0; for (var b = d - 1; b >= 1; b--) { var pv = sched[i][b]; if (pv && pv !== 'O') back++; else break; }
+    var fwd = 0; for (var f = d + 1; f <= nd; f++) { var nv = sched[i][f]; if (nv && nv !== 'O') fwd++; else break; }
+    return back + 1 + fwd <= cfg.maxConsec;
+  }
   for (var d = 1; d <= nd; d++) {
     var gap = (cfg.need.D - countShift(sched, d, 'D')) + (cfg.need.E - countShift(sched, d, 'E'));
     var guard = 0;
-    while (gap > 0 && guard++ < N) {
+    while (gap > 0 && guard++ < N * 2) {
+      // ① 그날 쉬는 액팅을 바로 S로 (오프 많은 사람 우선 → 과근 분산)
       var best = -1, bestOff = -1;
       for (var i = 0; i < N; i++) {
-        if (cfg.nurses[i].charge) continue;          // 액팅만 S
-        if (sched[i][d] !== 'O') continue;            // 그날 쉬는 사람만 호출
-        if (isLocked(cfg, i, d)) continue;            // 요청오프/나이트 전후오프 보호
-        if (d > 1 && sched[i][d - 1] === 'N') continue; // N 다음날 근무 금지
-        var back = 0; for (var b = d - 1; b >= 1; b--) { var pv = sched[i][b]; if (pv && pv !== 'O') back++; else break; }
-        var fwd = 0; for (var f = d + 1; f <= nd; f++) { var nv = sched[i][f]; if (nv && nv !== 'O') fwd++; else break; }
-        if (back + 1 + fwd > cfg.maxConsec) continue; // 연속근무 한도
+        if (sched[i][d] !== 'O') continue;
+        if (!canCallS(i, d)) continue;
         var o = countOffRow(sched, i, nd);
         if (o > bestOff) { bestOff = o; best = i; }
       }
-      if (best < 0) break;
-      sched[best][d] = 'S'; gap--;
+      if (best >= 0) { sched[best][d] = 'S'; gap--; continue; }
+      // ② 쉬는 액팅이 없으면: 그날 일하는 액팅 B를 S로 돌리고, 빈 B자리를 쉬는 차지 C가 메움
+      //    (액팅이 추가근무 S를 맡고, 차지가 정규 D/E를 대신 → "액팅번 S" 유지하며 한 명 더 투입)
+      var done = false;
+      for (var B = 0; B < N && !done; B++) {
+        if (cfg.nurses[B].charge) continue;
+        var sh = sched[B][d];
+        if (sh !== 'D' && sh !== 'E') continue;     // B는 그날 D/E 근무 중
+        if (isLocked(cfg, B, d)) continue;
+        for (var C = 0; C < N && !done; C++) {
+          if (!cfg.nurses[C].charge) continue;      // C는 차지
+          if (sched[C][d] !== 'O') continue;         // C는 그날 오프
+          if (isLocked(cfg, C, d)) continue;
+          if (countOffRow(sched, C, nd) <= cfg.offMin) continue; // 차지는 오프 최소 밑으로 안 내림
+          var saveB = sched[B][d], saveC = sched[C][d];
+          sched[C][d] = sh; sched[B][d] = 'S';
+          if (canWork(cfg, sched, C, d, sh)) { gap--; done = true; }
+          else { sched[B][d] = saveB; sched[C][d] = saveC; }
+        }
+      }
+      if (!done) break; // 그날 더 투입할 사람이 없음 → 부득이 미달(빨강)로 남김
     }
   }
 }
