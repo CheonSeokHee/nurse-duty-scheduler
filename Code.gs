@@ -933,13 +933,14 @@ function lockNightOff(cfg, i, day) {
   cfg.nightOffLock[i][day] = true;
 }
 
-/* i의 나이트 배치가 규칙 OK인지 (블록 길이 ≤ 사람별/전역 최대, N 다음날 근무 없음) */
+/* i의 나이트 배치가 규칙 OK인지 (블록 길이 2~사람별/전역 최대, 1박 금지, N 다음날 근무 없음) */
 function nightArrangementOK(cfg, sched, i) {
   var nd = cfg.numDays, mx = cfg.nurses[i].nightMaxLen || cfg.nightLen;
   for (var d = 1; d <= nd; d++) {
     if (sched[i][d] === 'N' && sched[i][d - 1] !== 'N') {
       var len = 0; while (sched[i][d + len] === 'N') len++;
       if (len > mx || len > cfg.nightLen) return false;
+      if (len === 1 && cfg.nightLen >= 2) return false;       // 1박짜리 나이트 금지
     }
     if ((sched[i][d] === 'D' || sched[i][d] === 'E' || sched[i][d] === 'S') && sched[i][d - 1] === 'N') return false;
   }
@@ -1024,6 +1025,7 @@ function rebuildNightOffs(cfg, sched, i) {
 function canHostNightBlock(cfg, sched, i, s, e) {
   var nd = cfg.numDays, len = e - s + 1;
   if (s < 1 || e > nd || len < 1 || len > cfg.nightLen) return false;
+  if (len === 1 && cfg.nightLen >= 2) return false;          // 1박짜리 나이트 금지
   if (len > (cfg.nurses[i].nightMaxLen || cfg.nightLen)) return false; // 사람별 최대연속 존중
   for (var d = s; d <= e; d++) if (sched[i][d] !== '') return false;
   var obn = (len >= cfg.nightLen) ? cfg.offBeforeNight : 0;
@@ -1075,7 +1077,7 @@ function enforceFirstOffNight(cfg, sched) {
       // 그날 같은 역할 나이트 없음(미달) → 인원 여유 있으면 X가 a부터 새 블록 생성
       if (countShift(sched, a, 'N') < cfg.need.N) {
         var mxL = cfg.nurses[X].nightMaxLen || cfg.nightLen; // 사람별 나이트 최대연속 존중
-        var lens = [3, 2, 1].filter(function (L) { return L <= mxL; });
+        var lens = [3, 2].filter(function (L) { return L <= mxL; }); // 1박은 만들지 않음
         for (var li = 0; li < lens.length; li++) {
           if (a + lens[li] - 1 <= nd && canHostNightBlock(cfg, sched, X, a, a + lens[li] - 1)) {
             for (var dn = a; dn <= a + lens[li] - 1; dn++) sched[X][dn] = SHIFT.N;
@@ -1093,6 +1095,8 @@ function enforceFirstOffNight(cfg, sched) {
     var locked = false;
     for (var dch = s1; dch <= e1; dch++) if (isLocked(cfg, Y, dch)) { locked = true; break; }
     if (locked) continue;
+    // 1박 금지: 분할 후 Y가 머리[s1..a-1]에 1박만 남거나 X가 [a..e1]에 1박만 가지면 스왑 포기
+    if (cfg.nightLen >= 2 && ((a - s1) === 1 || (e1 - a + 1) === 1)) continue;
     // X가 가져갈 부분 = [a..e1] (a 앞은 X의 요청오프라 못 가짐). Y는 [s1..a-1]을 유지.
     // ① Y의 꼬리를 비우고 X가 가질 수 있는지 확인
     for (var dc = a; dc <= e1; dc++) sched[Y][dc] = '';
@@ -1310,18 +1314,32 @@ function assignNights(cfg, sched, rng) {
 function offAfterFor(cfg, blockLen) {
   return (blockLen >= cfg.nightLen) ? (cfg.offAfterNight3 || 2) : (cfg.offAfterNight || 1);
 }
-/* 나이트 목표 T를 블록으로 분해. 1·2·3일 자유롭게 섞음(개수 합은 정확히 T).
-   maxLen: 1블록 최대 길이(사람별, 기본 3 / 편혜경·박수진=2) */
-function splitNightBlocks(T, rng, maxLen) {
-  if (T === 0) return [];
+/* 나이트 목표 T를 블록으로 분해. 1박짜리 블록은 절대 만들지 않는다(최소 2, 2·3으로 분해).
+   maxLen: 1블록 최대 길이(사람별, 기본 3 / 편혜경·박수진=2)
+   prefer3: true면 3개씩 묶고(N-N-N) 자투리만 2로 — 액팅 전용
+   ※ 자투리 1이 불가피하면 직전 블록에 흡수해 1박을 없앤다(전역 최대 3까지 허용). */
+function splitNightBlocks(T, rng, maxLen, prefer3) {
+  if (T <= 0) return [];
+  if (T === 1) return [1];                                   // 목표가 1박뿐이면 분해 불가(유일한 예외)
   var mx = maxLen || 3;
   var b = [], r = T;
+  if (prefer3 && mx >= 3) {                                  // 액팅: 3연속 위주
+    while (r >= 3) { b.push(3); r -= 3; }
+    if (r === 2) b.push(2);
+    else if (r === 1) { b.pop(); b.push(2, 2); }             // …,3,1 → …,2,2 (1박 제거)
+    return b;
+  }
   while (r > 0) {
     var size;
     if (r <= mx) size = r;                                   // 남은 게 한 블록에 들어가면 그대로
-    else if (mx <= 2) size = mx;                             // 최대 2면 2씩
-    else { var x = rng ? rng() : 0.6; size = x < 0.2 ? 1 : (x < 0.55 ? 2 : 3); } // 1·2·3 골고루
+    else if (mx <= 2) size = 2;                              // 최대 2면 2씩
+    else { var x = rng ? rng() : 0.6; size = x < 0.5 ? 2 : 3; } // 2·3만 (1 금지)
     b.push(size); r -= size;
+  }
+  if (b.length >= 2 && b[b.length - 1] === 1) {              // 마지막 1박 제거
+    var prev = b[b.length - 2];
+    if (prev <= 2) { b[b.length - 2] = prev + 1; b.pop(); }  // 2,1 → 3
+    else { b[b.length - 2] = 2; b[b.length - 1] = 2; }       // 3,1 → 2,2
   }
   return b;
 }
@@ -1379,7 +1397,8 @@ function tileNightRole(nd, idxs, rng, counts, cfg) {
   for (var k = 0; k < count; k++) {
     var nightsK = counts ? counts[idxs.indexOf(order[k])] : (base + (k < extra ? 1 : 0));
     var mxLen = (cfg && cfg.nurses[order[k]]) ? cfg.nurses[order[k]].nightMaxLen : 3;
-    var sizes = splitNightBlocks(nightsK, rng, mxLen);
+    var isActing = !!(cfg && cfg.nurses[order[k]] && !cfg.nurses[order[k]].charge);
+    var sizes = splitNightBlocks(nightsK, rng, mxLen, isActing); // 액팅은 3연속 위주로 묶음
     if (sizes === null) return null;
     queues.push({ nurse: order[k], sizes: sizes });
   }
