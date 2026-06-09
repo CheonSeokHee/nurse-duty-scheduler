@@ -724,6 +724,11 @@ function tryBuild(cfg, rng) {
   //    드물게(빡빡한 달) 구성이 못 피하는 1칸을 합법 상태로 만든다.
   repairHardViolations(cfg, sched);
 
+  // 5-b) 잔여 연속오프 강제 해소: 위 단계들이 못 깬 초과 오프런(오프최소에 걸려 못 줄였거나
+  //      repairHardViolations가 근무를 O로 바꿔 새로 생긴 런)을 자유오프 1칸을 S로 돌려 끊는다.
+  //      하드규칙(연속오프 한도) > 오프최소 목표.
+  breakOffRuns(cfg, sched);
+
   // 6) 인원 과잉 모드: 남는 액팅을 S(보조근무)로 → 오프 10~11 맞춤.
   assignSupport(cfg, sched);
   // 6-b) D/E 초과(3번째)가 생겼으면 그 액팅을 S로 relabel → 데이/이브닝 정확히 2 유지.
@@ -889,6 +894,52 @@ function limitConsecutiveOff(cfg, sched) {
         } else run = 0;
       }
       if (!fixed) break; // 더 고칠 게 없으면 종료
+    }
+  }
+}
+
+/* 잔여 연속오프 강제 해소(하드 보장): limitConsecutiveOff가 못 깬 초과 오프런을,
+   런 안의 "자유오프"(요청오프·나이트 전후 필수오프가 아닌 칸) 1개를 S(보조근무)로 돌려 끊는다.
+   오프최소(offMin) 밑으로 내려가더라도 하드규칙(연속오프 한도)을 우선한다.
+   런이 전부 잠금(예: 두 3연속 사이 gap-3)이라 못 끊으면 그 런은 남긴다(예방은 pickWindowNurse가 담당). */
+function breakOffRuns(cfg, sched) {
+  var nd = cfg.numDays, N = cfg.nurses.length;
+  function consecOK(i, d) {
+    var back = 0; for (var b = d - 1; b >= 1; b--) { var pv = sched[i][b]; if (pv && pv !== 'O') back++; else break; }
+    var fwd = 0; for (var f = d + 1; f <= nd; f++) { var nv = sched[i][f]; if (nv && nv !== 'O') fwd++; else break; }
+    return back + 1 + fwd <= cfg.maxConsec;
+  }
+  // d를 S(근무)로 바꿔도 되나? 자유오프 + N 다음날 아님 + 3연속N 앞 필수오프 아님 + 연속근무 OK
+  function canWorkHere(i, d) {
+    if (!(sched[i][d] === 'O' || sched[i][d] === '')) return false;
+    if (isLocked(cfg, i, d)) return false;                       // 요청오프·나이트 필수오프 보호
+    if (d > 1 && sched[i][d - 1] === 'N') return false;           // N 다음날 근무 금지
+    if (d < nd && sched[i][d + 1] === 'N') {                      // 다음날이 3연속 나이트 시작이면 앞 필수오프
+      var L = 0; while (sched[i][d + 1 + L] === 'N') L++;
+      if (L >= cfg.nightLen) return false;
+    }
+    return consecOK(i, d);
+  }
+  for (var i = 0; i < N; i++) {
+    var maxCO = cfg.nurses[i].charge ? (cfg.maxConsecOffCharge || 3) : (cfg.maxConsecOffActing || 2);
+    for (var pass = 0; pass < nd; pass++) {
+      var run = 0, rs = 0, hit = -1;
+      for (var d = 1; d <= nd; d++) {
+        if (sched[i][d] === 'O' || sched[i][d] === '') { if (run === 0) rs = d; run++; if (run > maxCO) { hit = rs; break; } }
+        else run = 0;
+      }
+      if (hit < 0) break;                                         // 초과 런 없음
+      var re = hit; while (re <= nd && (sched[i][re] === 'O' || sched[i][re] === '')) re++; re--;
+      // 끊을 칸 후보 순서: 한도 지점(hit+maxCO)에 가까운 칸부터 → 런을 고르게 분할
+      var target = hit + maxCO, placed = false;
+      for (var span = 0; span <= (re - hit) && !placed; span++) {
+        var cands = (span === 0) ? [target] : [target + span, target - span];
+        for (var ci = 0; ci < cands.length && !placed; ci++) {
+          var cd = cands[ci];
+          if (cd >= hit && cd <= re && canWorkHere(i, cd)) { sched[i][cd] = 'S'; placed = true; }
+        }
+      }
+      if (!placed) break;                                         // 전부 잠금 → 못 끊음(남김)
     }
   }
 }
@@ -1402,15 +1453,21 @@ function tileNightRole(nd, idxs, rng, counts, cfg) {
     if (sizes === null) return null;
     queues.push({ nurse: order[k], sizes: sizes });
   }
-  var seq = [], last = -1, remain = 0, gi;
+  var seq = [], remain = 0, gi;
   for (gi = 0; gi < queues.length; gi++) remain += queues[gi].sizes.length;
   var guard = 0;
   while (remain > 0 && guard++ < 100000) {
     queues.sort(function (a, b) { return b.sizes.length - a.sizes.length; });
+    var n1 = seq.length >= 1 ? seq[seq.length - 1].nurse : -1; // 직전 블록 주인
+    var n2 = seq.length >= 2 ? seq[seq.length - 2].nurse : -1; // 그 앞 블록 주인
     var pick = null, qi;
-    for (qi = 0; qi < queues.length; qi++) if (queues[qi].sizes.length > 0 && queues[qi].nurse !== last) { pick = queues[qi]; break; }
+    // ① 최근 2블록 주인과 모두 다른 사람 (같은 사람 블록 간 거리 ≥3 → 사이에 근무 가능한 날 확보 → 3연속 오프 방지)
+    for (qi = 0; qi < queues.length; qi++) if (queues[qi].sizes.length > 0 && queues[qi].nurse !== n1 && queues[qi].nurse !== n2) { pick = queues[qi]; break; }
+    // ② 안 되면 직전 1블록 주인과만 다르게
+    if (!pick) for (qi = 0; qi < queues.length; qi++) if (queues[qi].sizes.length > 0 && queues[qi].nurse !== n1) { pick = queues[qi]; break; }
+    // ③ 그래도 없으면 아무거나
     if (!pick) for (qi = 0; qi < queues.length; qi++) if (queues[qi].sizes.length > 0) { pick = queues[qi]; break; }
-    seq.push({ nurse: pick.nurse, size: pick.sizes.shift() }); last = pick.nurse; remain--;
+    seq.push({ nurse: pick.nurse, size: pick.sizes.shift() }); remain--;
   }
   for (var si = 1; si < seq.length; si++) if (seq[si].nurse === seq[si - 1].nurse) return null; // 같은 너스 연속 = 실패
   var owner = [], day = 1;
@@ -1627,6 +1684,19 @@ function pickWindowNurse(cfg, sched, start, end, winSize, thisNights, sizeCount,
     if (ok) pool.push(i);
   }
   if (!pool.length) return -1;
+  // gap-3 회피: 이 사람이 이미 가진 3연속 블록이 이 윈도 바로 앞에 "한 블록 거리(gap=3)"로 있으면
+  // 앞블록 뒤2오프 + 이블록(3연속) 앞1오프 = 3연속 오프가 강제됨 → 나중에 못 고침. 그런 후보는 맨 뒤로.
+  var g3 = {};
+  for (var pi = 0; pi < pool.length; pi++) {
+    var pn = pool[pi], pe = -1;
+    for (var pd = start - 1; pd >= 1 && pd >= start - 5; pd--) if (sched[pn][pd] === 'N') { pe = pd; break; }
+    var creates = false;
+    if (pe >= 0 && winSize >= cfg.nightLen && (start - pe - 1) === 3) {
+      var pl = 0, ps = pe; while (ps >= 1 && sched[pn][ps] === 'N') { pl++; ps--; }
+      if (pl >= cfg.nightLen) creates = true; // 앞 블록도 3연속일 때만 3연속 오프 강제
+    }
+    g3[pn] = creates ? 1 : 0;
+  }
   pool.sort(function (a, b) {
     // 0) 두 번째 자리(커버리지 외)는 "액팅 절대 우선" → 매일 밤 차지1+액팅1 구성 유지.
     //    (이걸 부족분보다 아래에 두면, 선호 재분배로 차지 목표가 액팅보다 커질 때
@@ -1635,6 +1705,7 @@ function pickWindowNurse(cfg, sched, start, end, winSize, thisNights, sizeCount,
       var ra = cfg.nurses[a].charge ? 1 : 0, rb = cfg.nurses[b].charge ? 1 : 0;
       if (ra !== rb) return ra - rb;
     }
+    if (g3[a] !== g3[b]) return g3[a] - g3[b]; // gap-3 유발 후보는 뒤로 (마지막 수단으로만)
     // 1) 목표 대비 부족분(deficit) 큰 사람 먼저 → 각자 목표치까지 채움
     //    (선호는 nightTarget 자체에 이미 반영됨 — N선호=목표↑, D/E선호=목표↓)
     var defa = nightTarget[a] - thisNights[a], defb = nightTarget[b] - thisNights[b];
@@ -1919,7 +1990,7 @@ function evaluate(cfg, sched) {
     prefMiss: prefMiss, donMiss: donMiss, dutyMiss: dutyMiss,
     // 하드 패턴·필수인원(floor)·오프는 최상위 가중. 3번째 데이/이브닝(targetMiss)은
     // "있으면 좋은" 가벼운 벌점 — S/여유로 채우되 못 채워도 빨강 아님.
-    total: patViol * 120 + unfilled * 100 + overStaff * 60 + hard * 80 + offDev * 30 + consecOffViol * 25 +
+    total: patViol * 120 + unfilled * 100 + overStaff * 60 + hard * 80 + offDev * 30 + consecOffViol * 130 +
       donMiss * 50 + dutyMiss * 45 + nightLenViol * 20 + targetMiss * 8 + nightDev * 6 + roleViol * 10 + prefMiss
   };
 }
