@@ -1,0 +1,5 @@
+# clasp는 아래 두 파일만 Apps Script(구글시트)로 올린다.
+# core/ 는 Node 전용(서버용)이라 GAS에 올리면 require/중복선언으로 깨짐 → 반드시 제외.
+**/**
+!appsscript.json
+!Code.gs

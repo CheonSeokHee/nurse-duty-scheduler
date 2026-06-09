@@ -1,0 +1,16 @@
+{
+  "name": "duty-scheduler-core",
+  "version": "1.0.0",
+  "description": "간호사 듀티 스케줄 코어 알고리즘 (Code.gs에서 추출, 시트 I/O 없음). 서버/도커/Lambda 재사용용.",
+  "main": "scheduler.js",
+  "scripts": {
+    "extract": "node extract-from-codegs.js",
+    "example": "node run-example.js",
+    "parity": "node parity-check.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
