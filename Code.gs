@@ -1077,8 +1077,9 @@ function canHostNightBlock(cfg, sched, i, s, e) {
   var nd = cfg.numDays, len = e - s + 1;
   if (s < 1 || e > nd || len < 1 || len > cfg.nightLen) return false;
   var mxI = cfg.nurses[i].nightMaxLen || cfg.nightLen;
-  if (len === 1 && mxI >= 3) return false;                   // 1박 금지(단, 최대2인 편혜경·박수진은 1~2 허용)
   if (len > mxI) return false;                               // 사람별 최대연속 존중
+  // (1박 허용: enforceFirstOffNight의 D-O-N 스왑이 앵커 나이트를 1박으로 붙일 수 있게 함.
+  //  기본 타일링은 splitNightBlocks가 1박을 안 만들므로 1박은 앵커 주변에서만 드물게 생김)
   for (var d = s; d <= e; d++) if (sched[i][d] !== '') return false;
   var obn = (len >= cfg.nightLen) ? cfg.offBeforeNight : 0;
   for (var b = 1; b <= obn; b++) {
@@ -1123,13 +1124,18 @@ function enforceFirstOffNight(cfg, sched) {
     var role = cfg.nurses[X].charge;
     // 그날 같은 역할의 N 소유자 Y 찾기
     var Y = -1;
-    for (var i = 0; i < N; i++)
-      if (i !== X && cfg.nurses[i].charge === role && sched[i][a] === 'N') { Y = i; break; }
+    var Yclean = -1; // a가 블록 "시작"인 Y → 통째 스왑 가능(1박 안 생김). 우선 선택.
+    for (var i = 0; i < N; i++) {
+      if (i === X || cfg.nurses[i].charge !== role || sched[i][a] !== 'N') continue;
+      if (sched[i][a - 1] !== 'N') { Yclean = i; break; }  // a부터 Y 블록 시작 → 클린
+      if (Y < 0) Y = i;                                     // 아니면 분할 스왑 후보(1박 생길 수 있음)
+    }
+    if (Yclean >= 0) Y = Yclean;
     if (Y < 0) {
       // 그날 같은 역할 나이트 없음(미달) → 인원 여유 있으면 X가 a부터 새 블록 생성
       if (countShift(sched, a, 'N') < cfg.need.N) {
         var mxL = cfg.nurses[X].nightMaxLen || cfg.nightLen; // 사람별 나이트 최대연속 존중
-        var lens = [3, 2].filter(function (L) { return L <= mxL; }); // 1박은 만들지 않음
+        var lens = [3, 2, 1].filter(function (L) { return L <= mxL; }); // D-O-N 우선: 2~3 안 되면 1박이라도 붙임(월말 등)
         for (var li = 0; li < lens.length; li++) {
           if (a + lens[li] - 1 <= nd && canHostNightBlock(cfg, sched, X, a, a + lens[li] - 1)) {
             for (var dn = a; dn <= a + lens[li] - 1; dn++) sched[X][dn] = SHIFT.N;
@@ -1147,8 +1153,8 @@ function enforceFirstOffNight(cfg, sched) {
     var locked = false;
     for (var dch = s1; dch <= e1; dch++) if (isLocked(cfg, Y, dch)) { locked = true; break; }
     if (locked) continue;
-    // 1박 금지: 분할 후 Y가 머리[s1..a-1]에 1박만 남거나 X가 [a..e1]에 1박만 가지면 스왑 포기
-    if (cfg.nightLen >= 2 && ((a - s1) === 1 || (e1 - a + 1) === 1)) continue;
+    // D-O-N 우선: 분할로 1박이 생기더라도(앵커 나이트가 1박이거나 Y 머리가 1박) 스왑 진행.
+    // (요청오프 다음날 나이트 규칙을 위해 1박 일부 허용 — 사용자 선택)
     // X가 가져갈 부분 = [a..e1] (a 앞은 X의 요청오프라 못 가짐). Y는 [s1..a-1]을 유지.
     // ① Y의 꼬리를 비우고 X가 가질 수 있는지 확인
     for (var dc = a; dc <= e1; dc++) sched[Y][dc] = '';
@@ -1538,13 +1544,32 @@ function constructNights(cfg, sched, rng) {
     return true;
   }
 
-  // 요청/수기입력이 많은 달은 무충돌 타일링이 드물다 → attempt 안에서 여러 번 재추첨해
-  // 정확 구성(차지1+액팅1, 위반 0) 성공률을 끌어올린다. (요청 없으면 보통 1회에 통과)
-  var co = null, ao = null, found = false;
-  for (var retry = 0; retry < 80 && !found; retry++) {
-    co = tileNightRole(nd, charges, rng, cCounts, cfg);
-    ao = tileNightRole(nd, actings, rng, aCounts, cfg);
-    if (co && ao && tilingValid(co, ao)) found = true;
+  // 앵커 정렬 점수: 첫 리퀘스트 오프 다음날(anchorNext)에 그 사람 나이트가 시작되면 +1.
+  //   (요청오프 다음날=나이트 D-O-N 규칙을 "스왑 없이" 타일링 단계에서 바로 충족 → 1박/연속오프 안전)
+  var anchorCount = 0;
+  if (cfg.anchorNext) for (var ac = 0; ac < N; ac++) { var ad = cfg.anchorNext[ac]; if (ad && ad <= nd) anchorCount++; }
+  function alignScore(co, ao) {
+    if (!cfg.anchorNext) return 0;
+    var sc = 0;
+    for (var i = 0; i < N; i++) {
+      var a = cfg.anchorNext[i];
+      if (!a || a > nd) continue;
+      var own = cfg.nurses[i].charge ? co : ao;     // 유효 타일링은 리퀘스트오프 날 N을 안 줌 → own[a]===i면 블록 시작
+      if (own[a] === i) sc++;
+    }
+    return sc;
+  }
+
+  // 요청/수기입력이 많은 달은 무충돌 타일링이 드물다 → 여러 번 재추첨해 (1) 정확 구성 성공률을 올리고
+  // (2) 그 중 앵커(D-O-N)를 가장 많이 충족하는 타일링을 고른다. (전부 충족하면 조기 종료)
+  var co = null, ao = null, found = false, bestAlign = -1;
+  for (var retry = 0; retry < 150; retry++) {
+    var c2 = tileNightRole(nd, charges, rng, cCounts, cfg);
+    var a2 = tileNightRole(nd, actings, rng, aCounts, cfg);
+    if (!(c2 && a2 && tilingValid(c2, a2))) continue;
+    var al = alignScore(c2, a2);
+    if (al > bestAlign) { bestAlign = al; co = c2; ao = a2; found = true; }
+    if (al >= anchorCount) break;                   // 앵커 전부 정렬 → 더 볼 필요 없음
   }
   if (!found) return false;
 
