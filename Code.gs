@@ -991,7 +991,7 @@ function nightArrangementOK(cfg, sched, i) {
     if (sched[i][d] === 'N' && sched[i][d - 1] !== 'N') {
       var len = 0; while (sched[i][d + len] === 'N') len++;
       if (len > mx || len > cfg.nightLen) return false;
-      if (len === 1 && cfg.nightLen >= 2) return false;       // 1박짜리 나이트 금지
+      if (len === 1 && mx >= 3) return false;                 // 1박 금지(단, 최대2인 편혜경·박수진은 1~2 허용)
     }
     if ((sched[i][d] === 'D' || sched[i][d] === 'E' || sched[i][d] === 'S') && sched[i][d - 1] === 'N') return false;
   }
@@ -1076,8 +1076,9 @@ function rebuildNightOffs(cfg, sched, i) {
 function canHostNightBlock(cfg, sched, i, s, e) {
   var nd = cfg.numDays, len = e - s + 1;
   if (s < 1 || e > nd || len < 1 || len > cfg.nightLen) return false;
-  if (len === 1 && cfg.nightLen >= 2) return false;          // 1박짜리 나이트 금지
-  if (len > (cfg.nurses[i].nightMaxLen || cfg.nightLen)) return false; // 사람별 최대연속 존중
+  var mxI = cfg.nurses[i].nightMaxLen || cfg.nightLen;
+  if (len === 1 && mxI >= 3) return false;                   // 1박 금지(단, 최대2인 편혜경·박수진은 1~2 허용)
+  if (len > mxI) return false;                               // 사람별 최대연속 존중
   for (var d = s; d <= e; d++) if (sched[i][d] !== '') return false;
   var obn = (len >= cfg.nightLen) ? cfg.offBeforeNight : 0;
   for (var b = 1; b <= obn; b++) {
@@ -1365,26 +1366,31 @@ function assignNights(cfg, sched, rng) {
 function offAfterFor(cfg, blockLen) {
   return (blockLen >= cfg.nightLen) ? (cfg.offAfterNight3 || 2) : (cfg.offAfterNight || 1);
 }
-/* 나이트 목표 T를 블록으로 분해. 1박짜리 블록은 절대 만들지 않는다(최소 2, 2·3으로 분해).
+/* 나이트 목표 T를 블록으로 분해.
    maxLen: 1블록 최대 길이(사람별, 기본 3 / 편혜경·박수진=2)
    prefer3: true면 3개씩 묶고(N-N-N) 자투리만 2로 — 액팅 전용
-   ※ 자투리 1이 불가피하면 직전 블록에 흡수해 1박을 없앤다(전역 최대 3까지 허용). */
+   · maxLen≤2(편혜경·박수진): "한 번에 1~2개" → 2씩 + 자투리(1 허용). 3은 절대 안 만듦.
+   · maxLen≥3(그 외): 1박 블록 금지(최소 2, 2·3으로 분해). 자투리 1은 흡수. */
 function splitNightBlocks(T, rng, maxLen, prefer3) {
   if (T <= 0) return [];
-  if (T === 1) return [1];                                   // 목표가 1박뿐이면 분해 불가(유일한 예외)
   var mx = maxLen || 3;
+  if (mx <= 2) {                                             // 편혜경·박수진: 2씩 + 자투리(1 허용)
+    var b2 = [], r2 = T;
+    while (r2 > 0) { var s2 = Math.min(2, r2); b2.push(s2); r2 -= s2; } // 예: 5 → [2,2,1]
+    return b2;
+  }
+  if (T === 1) return [1];                                   // 목표가 1박뿐이면 분해 불가(드묾)
   var b = [], r = T;
-  if (prefer3 && mx >= 3) {                                  // 액팅: 3연속 위주
+  if (prefer3) {                                             // 액팅: 3연속 위주, 1박 금지
     while (r >= 3) { b.push(3); r -= 3; }
     if (r === 2) b.push(2);
     else if (r === 1) { b.pop(); b.push(2, 2); }             // …,3,1 → …,2,2 (1박 제거)
     return b;
   }
-  while (r > 0) {
+  while (r > 0) {                                            // 차지(mx=3): 2·3만, 1박 금지
     var size;
-    if (r <= mx) size = r;                                   // 남은 게 한 블록에 들어가면 그대로
-    else if (mx <= 2) size = 2;                              // 최대 2면 2씩
-    else { var x = rng ? rng() : 0.6; size = x < 0.5 ? 2 : 3; } // 2·3만 (1 금지)
+    if (r <= mx) size = r;
+    else { var x = rng ? rng() : 0.6; size = x < 0.5 ? 2 : 3; }
     b.push(size); r -= size;
   }
   if (b.length >= 2 && b[b.length - 1] === 1) {              // 마지막 1박 제거
