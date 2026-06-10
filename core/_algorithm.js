@@ -1024,6 +1024,69 @@ function tileNightRole(nd, idxs, rng, counts, cfg) {
   for (var bi = 0; bi < seq.length; bi++) for (var t = 0; t < seq[bi].size; t++) { owner[day] = seq[bi].nurse; day++; }
   return (day - 1 === nd) ? owner : null;
 }
+
+/* 앵커 정렬 타일링(백트래킹): "요청오프 다음날(anchorNext)"에 그 사람의 나이트 블록이
+   "시작"하도록 처음부터 깐다 → 스왑/분할 없이 D-O-N 충족 + 1박 안 생김.
+   - 블록은 2~3(최대2인 사람은 1~2). mx≥3은 1박 금지(자투리 1 방지).
+   - 같은 사람 블록 연속 금지. 요청오프/기입력 칸(sched 비어있지 않음)엔 안 놓음.
+   - 매 밤 정확히 1명(역할 합 = nd) 충족. 못 짜면 null → 호출부가 기존 랜덤 타일링으로 폴백.
+   counts[k] = idxs[k]의 목표 나이트 수. */
+
+function tileNightRoleAligned(nd, idxs, rng, counts, cfg, sched) {
+  var count = idxs.length;
+  if (!count) return null;
+  var rem = [], mxK = [];
+  for (var k = 0; k < count; k++) { rem[k] = counts ? counts[k] : 0; mxK[k] = Math.min(cfg.nurses[idxs[k]].nightMaxLen || cfg.nightLen, cfg.nightLen); }
+  // 앵커: day → local index (그 날 블록 시작이어야 함)
+  var anchorByDay = {}, anchorDays = [];
+  for (var k2 = 0; k2 < count; k2++) {
+    var a = cfg.anchorNext ? cfg.anchorNext[idxs[k2]] : 0;
+    if (a && a >= 1 && a <= nd && anchorByDay[a] == null) { anchorByDay[a] = k2; anchorDays.push(a); }
+  }
+  anchorDays.sort(function (x, y) { return x - y; });
+  function nextAnchorAfter(pos) { for (var z = 0; z < anchorDays.length; z++) if (anchorDays[z] > pos) return anchorDays[z]; return nd + 1; }
+  // c가 [pos..end]에 나이트 가능? (칸이 비어 있어야 — 요청오프/기입력 충돌 방지)
+  function freeFor(c, pos, end) {
+    var gi = idxs[c];
+    for (var d = pos; d <= end; d++) { var v = sched[gi][d]; if (v !== '' && v !== 'N') return false; }
+    return true;
+  }
+  var owner = [], order0 = [];
+  for (var k3 = 0; k3 < count; k3++) order0.push(k3);
+  var steps = 0;
+  function fill(pos, last) {
+    if (++steps > 3000) return false;               // 빠른 실패(분기 폭발 방지) → 호출부가 폴백
+    if (pos > nd) { for (var k = 0; k < count; k++) if (rem[k] !== 0) return false; return true; }
+    var forced = anchorByDay[pos];
+    var cands;
+    if (forced != null) { if (forced === last || rem[forced] <= 0) return false; cands = [forced]; }
+    else cands = shuffleArr(order0.slice(), rng).filter(function (k) { return rem[k] > 0 && k !== last; });
+    var nA = nextAnchorAfter(pos);
+    for (var ci = 0; ci < cands.length; ci++) {
+      var c = cands[ci], mx = mxK[c];
+      var sizes = (mx >= 3) ? [3, 2] : [2, 1];   // 큰 블록 우선
+      for (var si = 0; si < sizes.length; si++) {
+        var sz = sizes[si];
+        if (sz > mx || sz > rem[c]) continue;
+        if (mx >= 3 && (rem[c] - sz) === 1) continue;   // 자투리 1 방지(1박 금지)
+        var end = pos + sz - 1;
+        if (end > nd) continue;
+        if (nA <= end) continue;                        // 블록이 다음 앵커일을 덮으면 안 됨(앵커=블록시작)
+        if (!freeFor(c, pos, end)) continue;            // 요청오프/기입력 충돌
+        for (var d = pos; d <= end; d++) owner[d] = c;
+        rem[c] -= sz;
+        if (fill(end + 1, c)) return true;
+        rem[c] += sz;
+      }
+    }
+    return false;
+  }
+  if (!fill(1, -1)) return null;
+  var out = [];
+  for (var d2 = 1; d2 <= nd; d2++) out[d2] = idxs[owner[d2]];
+  return out;
+}
+
 /* 정확 구성: 차지/액팅 각각 타일링 → 매 밤 차지1+액팅1, 전원 정확히 목표 나이트. 전후 오프 부여 */
 
 function constructNights(cfg, sched, rng) {
@@ -1103,8 +1166,15 @@ function constructNights(cfg, sched, rng) {
   // (2) 그 중 앵커(D-O-N)를 가장 많이 충족하는 타일링을 고른다. (전부 충족하면 조기 종료)
   var co = null, ao = null, found = false, bestAlign = -1;
   for (var retry = 0; retry < 150; retry++) {
-    var c2 = tileNightRole(nd, charges, rng, cCounts, cfg);
-    var a2 = tileNightRole(nd, actings, rng, aCounts, cfg);
+    var c2, a2;
+    if (retry < 8) {
+      // 앵커 정렬 빌더 우선(요청오프 다음날에 블록 시작). 실패 시 랜덤 타일링으로 폴백.
+      c2 = tileNightRoleAligned(nd, charges, rng, cCounts, cfg, sched) || tileNightRole(nd, charges, rng, cCounts, cfg);
+      a2 = tileNightRoleAligned(nd, actings, rng, aCounts, cfg, sched) || tileNightRole(nd, actings, rng, aCounts, cfg);
+    } else {
+      c2 = tileNightRole(nd, charges, rng, cCounts, cfg);  // 다양성/폴백
+      a2 = tileNightRole(nd, actings, rng, aCounts, cfg);
+    }
     if (!(c2 && a2 && tilingValid(c2, a2))) continue;
     var al = alignScore(c2, a2);
     if (al > bestAlign) { bestAlign = al; co = c2; ao = a2; found = true; }
@@ -1581,5 +1651,5 @@ function evaluate(cfg, sched) {
 /* ===================== 시트에 기록 ===================== */
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { SHIFT, WORK_SHIFTS, PREF_DAY_SORT, NIGHT_STRENGTH_MAP, PREFMISS_WEIGHT_MAP, PREF_TARGET_RATIO, parseReqOff, parseDutyCount, minDayKey, parsePref, dayPrefRank, parsePrefStrength, nightWeightOf, prefMissWeightOf, countNurseShift, prefTargetCount, prefSatisfied, tryBuild, convertOverstaffToS, assignSupport, repairHardViolations, repairStaffing, limitConsecutiveOff, breakOffRuns, swapOffOut, countOffRow, lockNightOff, nightArrangementOK, fixNightCounts, nightBlocksOf, rebuildNightOffs, canHostNightBlock, enforceFirstOffNight, isLocked, chooseFillShift, topUpUnderworked, rotateShiftDeadlocks, countChargeOnShift, makesLongOff, assignNights, offAfterFor, splitNightBlocks, shuffleArr, allocByWeight, roleNightCounts, tileNightRole, constructNights, assignNightsGreedy, placeNight, pickWindowNurse, fillDayEvening, countEligible, fillDayShift, pickDayCandidate, fullWorkload, canWork, countShift, shiftHasCharge, workloadUpTo, makeRng, evaluate };
+  module.exports = { SHIFT, WORK_SHIFTS, PREF_DAY_SORT, NIGHT_STRENGTH_MAP, PREFMISS_WEIGHT_MAP, PREF_TARGET_RATIO, parseReqOff, parseDutyCount, minDayKey, parsePref, dayPrefRank, parsePrefStrength, nightWeightOf, prefMissWeightOf, countNurseShift, prefTargetCount, prefSatisfied, tryBuild, convertOverstaffToS, assignSupport, repairHardViolations, repairStaffing, limitConsecutiveOff, breakOffRuns, swapOffOut, countOffRow, lockNightOff, nightArrangementOK, fixNightCounts, nightBlocksOf, rebuildNightOffs, canHostNightBlock, enforceFirstOffNight, isLocked, chooseFillShift, topUpUnderworked, rotateShiftDeadlocks, countChargeOnShift, makesLongOff, assignNights, offAfterFor, splitNightBlocks, shuffleArr, allocByWeight, roleNightCounts, tileNightRole, tileNightRoleAligned, constructNights, assignNightsGreedy, placeNight, pickWindowNurse, fillDayEvening, countEligible, fillDayShift, pickDayCandidate, fullWorkload, canWork, countShift, shiftHasCharge, workloadUpTo, makeRng, evaluate };
 }
