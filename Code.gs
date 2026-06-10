@@ -1078,8 +1078,7 @@ function canHostNightBlock(cfg, sched, i, s, e) {
   if (s < 1 || e > nd || len < 1 || len > cfg.nightLen) return false;
   var mxI = cfg.nurses[i].nightMaxLen || cfg.nightLen;
   if (len > mxI) return false;                               // 사람별 최대연속 존중
-  // (1박 허용: enforceFirstOffNight의 D-O-N 스왑이 앵커 나이트를 1박으로 붙일 수 있게 함.
-  //  기본 타일링은 splitNightBlocks가 1박을 안 만들므로 1박은 앵커 주변에서만 드물게 생김)
+  if (len === 1 && mxI >= 3) return false;                   // 1박 금지(최대2인 편혜경·박수진만 1~2 허용)
   for (var d = s; d <= e; d++) if (sched[i][d] !== '') return false;
   var obn = (len >= cfg.nightLen) ? cfg.offBeforeNight : 0;
   for (var b = 1; b <= obn; b++) {
@@ -1135,7 +1134,7 @@ function enforceFirstOffNight(cfg, sched) {
       // 그날 같은 역할 나이트 없음(미달) → 인원 여유 있으면 X가 a부터 새 블록 생성
       if (countShift(sched, a, 'N') < cfg.need.N) {
         var mxL = cfg.nurses[X].nightMaxLen || cfg.nightLen; // 사람별 나이트 최대연속 존중
-        var lens = [3, 2, 1].filter(function (L) { return L <= mxL; }); // D-O-N 우선: 2~3 안 되면 1박이라도 붙임(월말 등)
+        var lens = [3, 2].filter(function (L) { return L <= mxL; }); // 1박은 안 만듦(최소 2)
         for (var li = 0; li < lens.length; li++) {
           if (a + lens[li] - 1 <= nd && canHostNightBlock(cfg, sched, X, a, a + lens[li] - 1)) {
             for (var dn = a; dn <= a + lens[li] - 1; dn++) sched[X][dn] = SHIFT.N;
@@ -1153,8 +1152,9 @@ function enforceFirstOffNight(cfg, sched) {
     var locked = false;
     for (var dch = s1; dch <= e1; dch++) if (isLocked(cfg, Y, dch)) { locked = true; break; }
     if (locked) continue;
-    // D-O-N 우선: 분할로 1박이 생기더라도(앵커 나이트가 1박이거나 Y 머리가 1박) 스왑 진행.
-    // (요청오프 다음날 나이트 규칙을 위해 1박 일부 허용 — 사용자 선택)
+    // 1박 금지: 분할 후 Y 머리[s1..a-1]가 1박이거나 X가 [a..e1]에 1박만 가지면 스왑 포기.
+    // (클린 스왑 = a가 Y 블록 시작인 경우만 통과 → 1박 안 생김. 그 외엔 앵커 미충족 허용.)
+    if (cfg.nightLen >= 2 && ((a - s1) === 1 || (e1 - a + 1) === 1)) continue;
     // X가 가져갈 부분 = [a..e1] (a 앞은 X의 요청오프라 못 가짐). Y는 [s1..a-1]을 유지.
     // ① Y의 꼬리를 비우고 X가 가질 수 있는지 확인
     for (var dc = a; dc <= e1; dc++) sched[Y][dc] = '';
