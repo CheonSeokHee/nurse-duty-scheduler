@@ -903,7 +903,7 @@ function assignNights(cfg, sched, rng) {
 /* 나이트 블록 길이별 종료 후 오프 수: 3일 블록 → 2오프, 1~2일 블록 → 1오프 */
 
 function offAfterFor(cfg, blockLen) {
-  return (blockLen >= cfg.nightLen) ? (cfg.offAfterNight3 || 2) : (cfg.offAfterNight || 1);
+  return Math.max(2, cfg.offAfterNight || 2); // 모든 나이트 블록(2박·3박) 뒤 2오프 고정 (액팅·차지 공통)
 }
 /* 나이트 목표 T를 블록으로 분해.
    maxLen: 1블록 최대 길이(사람별, 기본 3 / 편혜경·박수진=2)
@@ -1064,7 +1064,9 @@ function tileNightRoleAligned(nd, idxs, rng, counts, cfg, sched) {
     var nA = nextAnchorAfter(pos);
     for (var ci = 0; ci < cands.length; ci++) {
       var c = cands[ci], mx = mxK[c];
-      var sizes = (mx >= 3) ? [3, 2] : [2, 1];   // 큰 블록 우선
+      var isCharge = cfg.nurses[idxs[c]].charge;
+      var sizes = isCharge ? [3, 2] : [3];   // 액팅=3연속만 / 차지=3 또는 2 (큰 블록 우선)
+      if (mx < 3) sizes = isCharge ? [2, 1] : [];   // 나이트최대<3 특례(편혜경·박수진): 2박+자투리1 허용, 액팅은 해당없음
       for (var si = 0; si < sizes.length; si++) {
         var sz = sizes[si];
         if (sz > mx || sz > rem[c]) continue;
