@@ -4,3 +4,15 @@
 
 # clasp 개인 연결 설정
 .clasp.json
+
+# 비밀키(API 키 등) — 절대 커밋 금지
+.env
+
+# node
+node_modules/
+
+# 로컬 에이전트/에디터 설정
+.claude/
+
+# 저장 데이터(간호사 명단 등 개인정보 포함) — 커밋 금지
+server/data/

@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>🩺 간호사 듀티표 생성기</title>
+<style>
+  :root { --blue:#e3f0ff; --orange:#fff3e0; --purple:#ede7f6; --grey:#f3f3f3; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Apple SD Gothic Neo", system-ui, sans-serif; margin: 0; color: #1d1d1f; background:#f5f5f7; }
+  header { background:#fff; border-bottom:1px solid #e0e0e0; padding:14px 24px; }
+  header h1 { font-size:18px; margin:0; }
+  header p { margin:4px 0 0; color:#888; font-size:12px; }
+  .wrap { max-width:1500px; margin:0 auto; padding:20px 24px 60px; }
+  .card { background:#fff; border:1px solid #e5e5e5; border-radius:10px; padding:16px 18px; margin-bottom:18px; }
+  .card h2 { font-size:14px; margin:0 0 12px; color:#333; }
+  label { font-size:12px; color:#555; display:block; margin-bottom:3px; }
+  input, select { font-size:13px; padding:6px 8px; border:1px solid #ccc; border-radius:6px; }
+  input[type=number] { width:70px; }
+  .settings { display:flex; flex-wrap:wrap; gap:14px 18px; }
+  .fld { display:flex; flex-direction:column; }
+  table.grid { border-collapse:collapse; width:100%; font-size:13px; }
+  table.grid th, table.grid td { border:1px solid #e3e3e3; padding:4px 6px; text-align:left; }
+  table.grid th { background:#fafafa; font-weight:600; font-size:12px; color:#555; }
+  table.grid td input, table.grid td select { width:100%; border:1px solid transparent; background:transparent; padding:5px 6px; }
+  table.grid td input:focus, table.grid td select:focus { border-color:#0071e3; background:#fff; outline:none; }
+  .btn { font-size:13px; padding:8px 16px; border:0; border-radius:8px; background:#0071e3; color:#fff; cursor:pointer; }
+  .btn:disabled { background:#aaa; cursor:default; }
+  .btn.sec { background:#e8e8ed; color:#1d1d1f; }
+  .btn.tiny { padding:4px 9px; font-size:12px; }
+  .del { color:#cf222e; cursor:pointer; border:0; background:none; font-size:15px; }
+  #meta, #saveMeta { font-size:13px; color:#444; }
+  .ok { color:#1a7f37; font-weight:600; } .bad { color:#cf222e; font-weight:600; }
+  .scroll { overflow-x:auto; }
+  table.result { border-collapse:collapse; font-size:12px; }
+  table.result th, table.result td { border:1px solid #e0e0e0; padding:3px 5px; text-align:center; min-width:22px; }
+  table.result th.name, table.result td.name { text-align:left; white-space:nowrap; position:sticky; left:0; background:#fafafa; z-index:1; }
+  table.result td.D{background:var(--blue)} td.E{background:var(--orange)} td.N{background:var(--purple)}
+  table.result td.O{background:var(--grey);color:#bbb} table.result td.S{background:#e6f6ec;color:#1a7f37;font-weight:600}
+  table.result th.we { background:#ffecec; }
+  table.result tr.sum td { background:#f8f8fb; font-weight:600; color:#555; }
+  .legend { font-size:12px; color:#666; margin:8px 0; }
+  .legend span { display:inline-block; padding:2px 8px; border-radius:4px; margin-right:6px; }
+  .wardbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .hist { font-size:13px; }
+  .hist .item { display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid #f0f0f0; }
+  .hist .item:last-child { border-bottom:0; }
+  .hist .when { color:#999; font-size:12px; }
+  .muted { color:#999; font-size:12px; }
+</style>
+</head>
+<body>
+<header style="display:flex; justify-content:space-between; align-items:center; gap:12px">
+  <div>
+    <h1>🩺 간호사 3교대 듀티표 생성기</h1>
+    <p>병동별로 명단·규칙을 저장하고, 생성한 듀티표를 이력으로 보관합니다. (2단계 · 다병동 + 로그인)</p>
+  </div>
+  <div id="userArea" style="display:none; text-align:right; font-size:13px">
+    <span id="userName" style="font-weight:600"></span>
+    <button class="btn sec tiny" id="manageUsers" style="display:none">사용자 관리</button>
+    <button class="btn sec tiny" id="logout">로그아웃</button>
+  </div>
+</header>
+
+<!-- 로그인 오버레이 -->
+<div id="loginOverlay" style="display:none; position:fixed; inset:0; background:#f5f5f7; z-index:100; display:flex; align-items:center; justify-content:center">
+  <div class="card" style="width:340px; margin:0">
+    <h2 id="loginTitle" style="font-size:16px">로그인</h2>
+    <p id="loginHint" class="muted" style="margin:-6px 0 14px"></p>
+    <div class="fld" style="margin-bottom:10px"><label>아이디</label><input id="loginUser" autocomplete="username" style="width:100%"></div>
+    <div class="fld" style="margin-bottom:14px"><label>비밀번호</label><input id="loginPass" type="password" autocomplete="current-password" style="width:100%"></div>
+    <button class="btn" id="loginBtn" style="width:100%">로그인</button>
+    <div id="loginMsg" class="bad" style="font-size:12px; margin-top:10px; min-height:16px"></div>
+  </div>
+</div>
+
+<div class="wrap" id="appWrap" style="display:none">
+  <!-- 병동 선택 -->
+  <div class="card">
+    <div class="wardbar">
+      <strong style="font-size:14px">🏥 병동</strong>
+      <select id="wardSel" style="min-width:180px"></select>
+      <button class="btn sec tiny" id="newWard">+ 새 병동</button>
+      <button class="btn sec tiny" id="renameWard">이름 변경</button>
+      <button class="btn sec tiny" id="delWard">삭제</button>
+      <span id="wardMsg" class="muted"></span>
+    </div>
+  </div>
+
+  <!-- 설정 -->
+  <div class="card">
+    <h2>⚙️ 설정</h2>
+    <div class="settings">
+      <div class="fld"><label>연도</label><input type="number" id="year" value="2026"></div>
+      <div class="fld"><label>월</label><input type="number" id="month" value="6" min="1" max="12"></div>
+      <div class="fld"><label>Day 인원</label><input type="number" id="needD" value="2" min="0"></div>
+      <div class="fld"><label>Evening 인원</label><input type="number" id="needE" value="2" min="0"></div>
+      <div class="fld"><label>Night 인원</label><input type="number" id="needN" value="2" min="0"></div>
+      <div class="fld"><label>월 오프 최소</label><input type="number" id="offMin" value="10"></div>
+      <div class="fld"><label>월 오프 최대</label><input type="number" id="offMax" value="11"></div>
+      <div class="fld"><label>최대 연속근무</label><input type="number" id="maxConsec" value="4"></div>
+      <div class="fld"><label>나이트 블록 길이</label><input type="number" id="nightLen" value="3"></div>
+      <div class="fld"><label>최대 나이트 블록</label><input type="number" id="maxNightBlocks" value="2"></div>
+      <div class="fld"><label>나이트 후 오프</label><input type="number" id="offAfterNight" value="1"></div>
+      <div class="fld"><label>배분 모드</label>
+        <select id="nightMode"><option value="1">1 인원우선</option><option value="2" selected>2 균형</option><option value="3">3 나이트균등</option></select>
+      </div>
+      <div class="fld"><label>시드(선택)</label><input type="number" id="seed" placeholder="비우면 랜덤"></div>
+    </div>
+  </div>
+
+  <!-- 간호사 명단 -->
+  <div class="card">
+    <h2>👥 간호사 명단</h2>
+    <div class="scroll">
+      <table class="grid">
+        <thead><tr>
+          <th style="width:30px">#</th><th style="width:110px">이름</th><th style="width:90px">역할</th>
+          <th style="width:120px">요청오프 <small style="color:#aaa">예 21,22</small></th>
+          <th style="width:150px">근무개수 <small style="color:#aaa">예 N:6</small></th>
+          <th style="width:90px">나이트최대</th><th style="width:80px">선호</th><th style="width:40px"></th>
+        </tr></thead>
+        <tbody id="nurseBody"></tbody>
+      </table>
+    </div>
+    <div style="margin-top:10px; display:flex; gap:8px; align-items:center">
+      <button class="btn sec tiny" id="addNurse">+ 간호사 추가</button>
+      <button class="btn sec tiny" id="loadSample">샘플 11명</button>
+      <span class="muted">명단·설정은 선택한 병동에 자동 저장됩니다.</span>
+    </div>
+  </div>
+
+  <!-- 실행 -->
+  <div style="display:flex; gap:10px; align-items:center; margin-bottom:18px">
+    <button class="btn" id="go">▶ 듀티표 생성</button>
+    <span id="meta"></span>
+  </div>
+
+  <!-- 결과 -->
+  <div class="card" id="resultCard" style="display:none">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap">
+      <h2 style="margin:0">📋 듀티표</h2>
+      <div style="display:flex; gap:8px; align-items:center">
+        <input id="schLabel" placeholder="저장 이름 (예: 7월 1안)" style="width:160px">
+        <button class="btn sec tiny" id="saveSch">💾 이 듀티표 저장</button>
+        <span id="saveMeta" class="muted"></span>
+      </div>
+    </div>
+    <div class="legend" style="margin-top:10px">
+      <span style="background:var(--blue)">D 데이</span><span style="background:var(--orange)">E 이브닝</span>
+      <span style="background:var(--purple)">N 나이트</span><span style="background:#e6f6ec;color:#1a7f37">S 보조근무</span><span style="background:var(--grey);color:#999">O 오프</span>
+    </div>
+    <div class="scroll"><div id="out"></div></div>
+  </div>
+
+  <!-- 저장된 듀티표 이력 -->
+  <div class="card">
+    <h2>🗂️ 저장된 듀티표</h2>
+    <div class="hist" id="histList"><span class="muted">아직 저장된 듀티표가 없습니다.</span></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const J = (m,u,b)=>fetch(u,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(r=>r.json());
+const SAMPLE = [
+  {name:"편혜경",role:"차지",reqOff:"21,22",dutyCount:"D:14/N:5/E:0",nightMax:2},
+  {name:"이선정",role:"차지"},{name:"박수진",role:"차지",nightMax:2},
+  {name:"전초희",role:"차지"},{name:"김경진",role:"차지"},{name:"박지연",role:"차지"},
+  {name:"서문휘정",role:"액팅",reqOff:"12,13",dutyCount:"N:6"},
+  {name:"이서현",role:"액팅"},{name:"정선희",role:"액팅"},
+  {name:"곽예은",role:"액팅"},{name:"오혜경",role:"액팅"}
+];
+const SETTING_IDS = ['year','month','needD','needE','needN','offMin','offMax','maxConsec','nightLen','maxNightBlocks','offAfterNight','nightMode','seed'];
+let wardId = null, lastConfig = null, lastResult = null, suppressSave = false;
+
+// ── 간호사 표 ──
+function nurseRow(n) {
+  n = n || {};
+  const tr = document.createElement('tr');
+  tr.innerHTML =
+    '<td class="idx" style="text-align:center;color:#aaa"></td>' +
+    '<td><input class="c-name" value="'+(n.name||'')+'" placeholder="이름"></td>' +
+    '<td><select class="c-role"><option'+(n.role!=='차지'?' selected':'')+'>액팅</option><option'+(n.role==='차지'?' selected':'')+'>차지</option></select></td>' +
+    '<td><input class="c-reqOff" value="'+(n.reqOff||'')+'" placeholder="예: 21,22"></td>' +
+    '<td><input class="c-dutyCount" value="'+(n.dutyCount||'')+'" placeholder="예: N:6"></td>' +
+    '<td><input class="c-nightMax" type="number" value="'+(n.nightMax!=null?n.nightMax:'')+'" placeholder="-"></td>' +
+    '<td><select class="c-prefShift"><option value="">-</option>'+
+       ['D','E','N'].map(s=>'<option'+(n.prefShift===s?' selected':'')+'>'+s+'</option>').join('')+'</select></td>' +
+    '<td style="text-align:center"><button class="del" title="삭제">✕</button></td>';
+  tr.querySelector('.del').onclick = () => { tr.remove(); renumber(); scheduleSave(); };
+  tr.querySelectorAll('input,select').forEach(el => el.addEventListener('change', scheduleSave));
+  return tr;
+}
+function renumber(){ [...$('nurseBody').children].forEach((tr,i)=> tr.querySelector('.idx').textContent = i+1); }
+function addNurse(n){ $('nurseBody').appendChild(nurseRow(n)); renumber(); }
+function setNurses(list){ $('nurseBody').innerHTML=''; (list||[]).forEach(addNurse); }
+function readNurses(){
+  return [...$('nurseBody').children].map(tr => {
+    const v = c => tr.querySelector('.c-'+c).value.trim();
+    const o = { name:v('name'), role:v('role') };
+    if (v('reqOff')) o.reqOff = v('reqOff');
+    if (v('dutyCount')) o.dutyCount = v('dutyCount');
+    if (v('nightMax')) o.nightMax = Number(v('nightMax'));
+    if (v('prefShift')) o.prefShift = v('prefShift');
+    return o;
+  }).filter(n => n.name);
+}
+function readSettings(){ const s={}; SETTING_IDS.forEach(id=> s[id]=$(id).value); return s; }
+function applySettings(s){ s=s||{}; SETTING_IDS.forEach(id=>{ if(s[id]!=null && s[id]!=='') $(id).value=s[id]; }); }
+
+function collectConfig(){
+  const cfg = {
+    year:+$('year').value, month:+$('month').value,
+    need:{ D:+$('needD').value, E:+$('needE').value, N:+$('needN').value },
+    offMin:+$('offMin').value, offMax:+$('offMax').value,
+    maxConsec:+$('maxConsec').value, nightLen:+$('nightLen').value,
+    maxNightBlocks:+$('maxNightBlocks').value, offAfterNight:+$('offAfterNight').value,
+    nightMode:+$('nightMode').value, nurses: readNurses()
+  };
+  if ($('seed').value) cfg.seed = +$('seed').value;
+  return cfg;
+}
+
+// ── 병동: 명단 자동 저장(디바운스) ──
+let saveTimer=null;
+function scheduleSave(){
+  if (suppressSave || !wardId) return;
+  $('wardMsg').textContent='저장 중…';
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async ()=>{
+    await J('PUT',`/api/wards/${wardId}/roster`,{ settings:readSettings(), nurses:readNurses() });
+    $('wardMsg').textContent='✓ 저장됨';
+    setTimeout(()=>{ if($('wardMsg').textContent==='✓ 저장됨') $('wardMsg').textContent=''; }, 1500);
+  }, 700);
+}
+SETTING_IDS.forEach(id => $(id).addEventListener('change', scheduleSave));
+
+// ── 병동 로드/전환 ──
+async function refreshWards(selId){
+  const { wards } = await J('GET','/api/wards');
+  const sel = $('wardSel'); sel.innerHTML='';
+  wards.forEach(w=>{ const o=document.createElement('option'); o.value=w.id; o.textContent=w.name+'  ('+w.nurseCount+'명·'+w.scheduleCount+'개)'; sel.appendChild(o); });
+  return wards;
+}
+async function loadWard(id){
+  wardId = id; localStorage.setItem('duty_ward', id);
+  const { ward } = await J('GET',`/api/wards/${id}`);
+  suppressSave = true;
+  applySettings(ward.roster.settings);
+  setNurses(ward.roster.nurses && ward.roster.nurses.length ? ward.roster.nurses : []);
+  suppressSave = false;
+  $('wardSel').value = id;
+  renderHistory(ward.schedules);
+  $('resultCard').style.display='none'; $('meta').textContent='';
+}
+function renderHistory(list){
+  const el = $('histList');
+  if (!list || !list.length){ el.innerHTML='<span class="muted">아직 저장된 듀티표가 없습니다.</span>'; return; }
+  el.innerHTML='';
+  list.forEach(s=>{
+    const d = new Date(s.savedAt);
+    const div=document.createElement('div'); div.className='item';
+    div.innerHTML = '<b>'+s.label+'</b> <span class="when">'+d.toLocaleString('ko-KR')+'</span>';
+    const load=document.createElement('button'); load.className='btn sec tiny'; load.textContent='불러오기';
+    load.onclick=()=>loadSchedule(s.id);
+    const del=document.createElement('button'); del.className='del'; del.textContent='✕'; del.title='삭제';
+    del.onclick=async()=>{ if(!confirm('이 듀티표를 삭제할까요?'))return; await J('DELETE',`/api/wards/${wardId}/schedules/${s.id}`); reloadHistory(); };
+    div.appendChild(load); div.appendChild(del); el.appendChild(div);
+  });
+}
+async function reloadHistory(){ const {ward}=await J('GET',`/api/wards/${wardId}`); renderHistory(ward.schedules); refreshWards(); }
+async function loadSchedule(sid){
+  const { schedule } = await J('GET',`/api/wards/${wardId}/schedules/${sid}`);
+  lastResult = schedule.result; lastConfig = schedule.config;
+  renderResult(schedule.result);
+  $('meta').innerHTML = '<span class="muted">저장본 「'+schedule.label+'」 불러옴</span>';
+  window.scrollTo({top:$('resultCard').offsetTop-20, behavior:'smooth'});
+}
+
+// ── 결과 렌더 ──
+function renderResult(res){
+  const nd = res.numDays, y=res.year, m=res.month;
+  const dow = ['일','월','화','수','목','금','토'];
+  let h = '<table class="result"><thead><tr><th class="name">이름</th><th>역할</th>';
+  for (let d=1; d<=nd; d++){ const wd=new Date(y,m-1,d).getDay(); const we=(wd===0||wd===6);
+    h += '<th class="'+(we?'we':'')+'">'+d+'<br><small>'+dow[wd]+'</small></th>'; }
+  h += '<th>오프</th></tr></thead><tbody>';
+  for (const n of res.nurses){
+    const offs = n.shifts.filter(s=>s==='O').length;
+    h += '<tr><td class="name">'+n.name+'</td><td>'+n.role+'</td>';
+    for (const s of n.shifts){ const cls = ['D','E','N','S'].includes(s) ? s : 'O'; h += '<td class="'+cls+'">'+s+'</td>'; }
+    h += '<td>'+offs+'</td></tr>';
+  }
+  const tot = s => { const a=new Array(nd).fill(0); res.nurses.forEach(n=>n.shifts.forEach((x,i)=>{if(x===s)a[i]++;})); return a; };
+  const hasS = res.nurses.some(n=>n.shifts.includes('S'));
+  (hasS?['D','E','N','S']:['D','E','N']).forEach(s=>{ const a=tot(s);
+    h += '<tr class="sum"><td class="name">'+s+' 합</td><td></td>'+a.map(v=>'<td>'+v+'</td>').join('')+'<td></td></tr>'; });
+  h += '</tbody></table>';
+  $('out').innerHTML = h; $('resultCard').style.display='';
+}
+
+// ── 버튼 ──
+$('go').onclick = async () => {
+  const btn=$('go'); btn.disabled=true; $('meta').textContent='생성 중…'; $('saveMeta').textContent='';
+  try {
+    const cfg = collectConfig();
+    if (!cfg.nurses.length){ $('meta').innerHTML='<span class="bad">간호사를 한 명 이상 입력하세요.</span>'; btn.disabled=false; return; }
+    const j = await J('POST','/api/schedule',cfg);
+    if (!j.ok){ $('meta').innerHTML='<span class="bad">오류: '+j.error+'</span>'; btn.disabled=false; return; }
+    lastResult=j.result; lastConfig=cfg;
+    const res=j.result;
+    const clean = res.clean ? '<span class="ok">✅ 규칙 통과</span>' : '<span class="bad">⚠ 일부 규칙 위반 — 설정을 완화해 보세요</span>';
+    $('meta').innerHTML = clean + ` · ${res.year}/${res.month} (${res.numDays}일) · ${res.attempts}회 탐색 · 서버 ${j.elapsedMs}ms`;
+    renderResult(res);
+  } catch(e){ $('meta').innerHTML='<span class="bad">요청 실패: '+e.message+'</span>'; }
+  btn.disabled=false;
+};
+$('saveSch').onclick = async () => {
+  if (!lastResult){ return; }
+  $('saveMeta').textContent='저장 중…';
+  const label = $('schLabel').value.trim();
+  const j = await J('POST',`/api/wards/${wardId}/schedules`,{ label, config:lastConfig, result:lastResult });
+  if (j.ok){ $('saveMeta').innerHTML='<span class="ok">✓ 저장됨</span>'; $('schLabel').value=''; reloadHistory(); }
+  else $('saveMeta').innerHTML='<span class="bad">저장 실패</span>';
+};
+$('addNurse').onclick = () => { addNurse({}); scheduleSave(); };
+$('loadSample').onclick = () => { setNurses(SAMPLE); scheduleSave(); };
+$('wardSel').onchange = (e) => loadWard(e.target.value);
+$('newWard').onclick = async () => {
+  const name = prompt('새 병동 이름?', '병동');
+  if (name===null) return;
+  const { ward } = await J('POST','/api/wards',{ name });
+  await refreshWards(); await loadWard(ward.id);
+};
+$('renameWard').onclick = async () => {
+  const cur = $('wardSel').selectedOptions[0]; if(!cur) return;
+  const name = prompt('병동 이름 변경:', cur.textContent.split('  (')[0]);
+  if (!name) return;
+  await J('PUT',`/api/wards/${wardId}`,{ name }); await refreshWards(); $('wardSel').value=wardId;
+};
+$('delWard').onclick = async () => {
+  if (!confirm('이 병동을 삭제할까요? (저장된 듀티표도 함께 삭제됩니다)')) return;
+  await J('DELETE',`/api/wards/${wardId}`);
+  const wards = await refreshWards();
+  if (wards.length) loadWard(wards[0].id);
+  else { const { ward } = await J('POST','/api/wards',{ name:'내 병동' }); await refreshWards(); loadWard(ward.id); }
+};
+
+// ── 앱 시작 (로그인 후) ──
+async function appInit(){
+  let wards = await refreshWards();
+  if (!wards.length){
+    const { ward } = await J('POST','/api/wards',{ name:'내 병동' });
+    await refreshWards();
+    await loadWard(ward.id);
+    setNurses(SAMPLE); scheduleSave(); // 첫 병동은 샘플로 시작
+  } else {
+    const want = localStorage.getItem('duty_ward');
+    const pick = wards.find(w=>w.id===want) ? want : wards[0].id;
+    await loadWard(pick);
+  }
+}
+
+// ── 인증 ──
+let bootstrap = false;
+function showLogin(){
+  $('loginOverlay').style.display='flex'; $('appWrap').style.display='none'; $('userArea').style.display='none';
+  $('loginTitle').textContent = bootstrap ? '첫 관리자 계정 만들기' : '로그인';
+  $('loginHint').textContent = bootstrap ? '아직 계정이 없습니다. 첫 계정은 관리자로 생성됩니다.' : '';
+  $('loginBtn').textContent = bootstrap ? '관리자 계정 생성' : '로그인';
+  $('loginUser').focus();
+}
+function showApp(user){
+  $('loginOverlay').style.display='none'; $('appWrap').style.display=''; $('userArea').style.display='';
+  $('userName').textContent = user.username + (user.role==='admin' ? ' (관리자)' : '');
+  $('manageUsers').style.display = user.role==='admin' ? '' : 'none';
+  appInit();
+}
+async function checkAuth(){
+  const me = await J('GET','/api/auth/me');
+  bootstrap = me.needsBootstrap;
+  if (me.user) showApp(me.user); else showLogin();
+}
+$('loginBtn').onclick = async () => {
+  const username=$('loginUser').value.trim(), password=$('loginPass').value;
+  $('loginMsg').textContent='';
+  if (bootstrap){
+    const r = await J('POST','/api/auth/register',{ username, password });
+    if (!r.ok){ $('loginMsg').textContent=r.error; return; }
+    // 가입 후 바로 로그인
+  }
+  const r = await J('POST','/api/auth/login',{ username, password });
+  if (!r.ok){ $('loginMsg').textContent=r.error; return; }
+  $('loginPass').value=''; bootstrap=false;
+  showApp(r.user);
+};
+$('loginPass').addEventListener('keydown', e=>{ if(e.key==='Enter') $('loginBtn').click(); });
+$('logout').onclick = async () => { await J('POST','/api/auth/logout'); location.reload(); };
+$('manageUsers').onclick = async () => {
+  const { users } = await J('GET','/api/auth/users');
+  const list = users.map(u=>'· '+u.username+(u.role==='admin'?' (관리자)':'')).join('\n');
+  const act = prompt('현재 사용자:\n'+list+'\n\n새 계정을 만들려면 "아이디 비밀번호" 형식으로 입력 (취소=닫기).\n예: kim2 pass1234');
+  if (!act) return;
+  const [u,p] = act.trim().split(/\s+/);
+  if (!u || !p){ alert('형식: 아이디 비밀번호'); return; }
+  const r = await J('POST','/api/auth/register',{ username:u, password:p });
+  alert(r.ok ? ('계정 생성됨: '+u) : ('실패: '+r.error));
+};
+
+checkAuth();
+</script>
+</body>
+</html>

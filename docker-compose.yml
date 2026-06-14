@@ -1,0 +1,33 @@
+# 운영 배포 — 앱 + Caddy(자동 HTTPS) 2개 컨테이너.
+# 실행: SITE_ADDRESS=<도메인 또는 IP.sslip.io> docker compose up -d --build
+services:
+  app:
+    build: .
+    environment:
+      - COOKIE_SECURE=1            # HTTPS 뒤에 있으므로 Secure 쿠키
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}   # 챗봇 쓸 때만(선택)
+    volumes:
+      - dutydata:/app/server/data  # 명단·이력·계정 영구 저장
+    expose:
+      - "3000"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - SITE_ADDRESS=${SITE_ADDRESS}   # 예: 1-2-3-4.sslip.io  또는  duty.example.com
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data            # 발급받은 인증서 보관(갱신 자동)
+      - caddyconfig:/config
+    restart: unless-stopped
+    depends_on:
+      - app
+
+volumes:
+  dutydata:
+  caddydata:
+  caddyconfig:

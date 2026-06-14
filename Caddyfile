@@ -1,0 +1,6 @@
+# {$SITE_ADDRESS} = 환경변수 SITE_ADDRESS (도메인 또는 IP.sslip.io)
+# 이 주소로 들어온 요청을 app:3000 으로 넘기고, HTTPS 인증서는 Caddy가 자동 발급/갱신.
+{$SITE_ADDRESS} {
+	encode gzip
+	reverse_proxy app:3000
+}
