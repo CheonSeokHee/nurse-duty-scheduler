@@ -62,7 +62,51 @@ function onOpen() {
     .addSeparator()
     .addItem('수기 입력 잠금 해제(전체 새로 짜기)', 'resetPresetLock')
     .addItem('표 내용만 비우기', 'clearDutyValues')
+    .addItem('📅 일수 콤보 추가(30/31 직접선택)', 'setupDayPicker')
+    .addSeparator()
+    .addItem('🔧 진단(31일 안 보일 때)', 'diagnose31')
     .addToUi();
+}
+
+/* 기존 설정 시트에 '일수 직접지정' 콤보(C3)를 비파괴로 추가 — 데이터 안 지움 */
+function setupDayPicker() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var s = ss.getSheetByName(SETTINGS_SHEET);
+  if (!s) { SpreadsheetApp.getUi().alert('설정 시트가 없습니다. 먼저 [① 시트 세팅]을 실행하세요.'); return; }
+  s.getRange(2, 3).setValue('← 일수 지정(자동/28~31)').setFontWeight('bold');
+  var dayRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['자동', '28', '29', '30', '31'], true).build();
+  s.getRange(3, 3).setDataValidation(dayRule);
+  if (!s.getRange(3, 3).getValue()) s.getRange(3, 3).setValue('자동');
+  SpreadsheetApp.getActiveSpreadsheet().toast(
+    '설정 시트 C3에 일수 콤보를 추가했어요. 30/31을 직접 고른 뒤 [② 자동 배정]을 누르세요.', '듀티표', 7);
+}
+
+/* [진단] 31일 열이 안 보이는 원인 파악용 — 핵심 값을 알림창으로 표시 */
+function diagnose31() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var s = ss.getSheetByName(SETTINGS_SHEET);
+  var rawYear = s ? s.getRange(2, 2).getValue() : '(설정시트없음)';
+  var rawMonth = s ? s.getRange(3, 2).getValue() : '(설정시트없음)';
+  var cfg = readSettings();
+  var d = ss.getSheetByName(DUTY_SHEET);
+  var lines = [];
+  lines.push('연도셀(B2)=' + rawYear + ' / 월셀(B3)=' + rawMonth);
+  lines.push('인식한 numDays = ' + cfg.numDays + ' (31이어야 정상)');
+  if (!d) { lines.push('※ 듀티표 시트가 없습니다.'); }
+  else {
+    lines.push('듀티표 최대열 = ' + d.getMaxColumns() + ' (36 이상이어야 31일+합계 표시)');
+    lines.push('듀티표 최대행 = ' + d.getMaxRows());
+    var col31 = 2 + 31 - 1; // 31일 칸 열 = 32(AF)
+    var hdr31 = d.getRange(2, col31).getValue();
+    var first31 = d.getRange(DUTY_DATA_START_ROW, col31).getValue();
+    lines.push('헤더 31일칸(2행,32열) = "' + hdr31 + '"');
+    lines.push('첫 간호사 31일칸(4행,32열) = "' + first31 + '"');
+    var hidden = '';
+    try { hidden = d.isColumnHiddenByUser(col31) ? '예(숨김!)' : '아니오'; } catch (e) { hidden = '확인불가'; }
+    lines.push('31일 열이 숨김 상태? = ' + hidden);
+  }
+  SpreadsheetApp.getUi().alert('🔧 31일 진단\n\n' + lines.join('\n'));
 }
 
 /* ===================== 시트 세팅 ===================== */
@@ -93,6 +137,12 @@ function setupSheets() {
   ];
   s.getRange(2, 1, rows.length, 2).setValues(rows);
   s.getRange(2, 1, rows.length, 1).setFontWeight('bold');
+
+  // 일수 직접지정 콤보 (C3): '자동'=월로 계산 / 28~31=강제
+  s.getRange(2, 3).setValue('← 일수 지정(자동/28~31)').setFontWeight('bold');
+  var dayRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['자동', '28', '29', '30', '31'], true).build();
+  s.getRange(3, 3).setDataValidation(dayRule).setValue('자동');
 
   // 간호사 목록 헤더
   s.getRange(NURSE_START_ROW - 1, 1).setValue('■ 간호사 목록 (역할: 차지 / 액팅)').setFontWeight('bold');
@@ -212,11 +262,21 @@ function readSettings() {
   }
   cfg.nurses = nurses;
   cfg.numDays = new Date(cfg.year, cfg.month, 0).getDate();
+  // 일수 직접지정 콤보(설정시트 C3): 28~31을 고르면 월 자동계산 대신 그 값을 강제.
+  //   비움/'자동'/이상값이면 위의 월 기준 자동계산을 그대로 쓴다.
+  var dayOverride = parseInt(s.getRange(3, 3).getValue(), 10);
+  if (dayOverride >= 28 && dayOverride <= 31) cfg.numDays = dayOverride;
   // 인원 과잉(surplus) 모드: 정규 근무(D+E+N)가 적어 다들 오프가 너무 많아지는 구성.
   //  → 차지는 D/E를 우선 채워 오프를 맞추고, 남는 액팅은 S(보조근무)로 돌려 오프 10~11 유지.
   var coreWork = (cfg.need.D + cfg.need.E + cfg.need.N) * cfg.numDays;
   var minTotalWork = cfg.nurses.length * (cfg.numDays - cfg.offMax);
   cfg.surplus = coreWork < minTotalWork;
+  // 실현가능 최소 인원: 1인이 오프최대(offMax)를 다 써도 하루 필요근무(D+E+N)를 매일 채우려면
+  //   인원 × (일수 - 오프최대) ≥ (D+E+N) × 일수 여야 한다. → 이 밑이면 빈칸 불가피(물리적 한계).
+  //   일수(30/31)·인원·필요인원·오프를 바꿔도 자동으로 다시 계산된다.
+  var workableDays = Math.max(1, cfg.numDays - cfg.offMax);
+  cfg.minPeople = Math.ceil(coreWork / workableDays);
+  cfg.feasible = cfg.nurses.length >= cfg.minPeople;
   return cfg;
 }
 
@@ -317,6 +377,14 @@ function prefSatisfied(cfg, sched, i) {
 }
 
 /* ===================== 듀티표 템플릿 그리기 ===================== */
+/* 시트가 최소 needRows행·needCols열을 갖도록 보장 (모자라면 추가). 기본 시트는 26열뿐이라 필수. */
+function ensureGrid(sheet, needRows, needCols) {
+  var maxC = sheet.getMaxColumns();
+  if (maxC < needCols) sheet.insertColumnsAfter(maxC, needCols - maxC);
+  var maxR = sheet.getMaxRows();
+  if (maxR < needRows) sheet.insertRowsAfter(maxR, needRows - maxR);
+}
+
 function drawDutyTemplate() {
   var cfg = readSettings();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -328,6 +396,11 @@ function drawDutyTemplate() {
   var nN = cfg.nurses.length;
   var firstDayCol = 2;          // B열부터 1일
   var sumStartCol = firstDayCol + nd; // 합계 컬럼 시작
+
+  // 시트 격자 확보: 새 시트는 기본 26열뿐인데 31일 달은 합계까지 36열(B~AJ)이 필요하다.
+  //   열이 모자라면 뒤쪽 날짜(예: 31일)·합계열이 안 그려지므로 그리기 전에 미리 늘린다.
+  //   일수(28~31)·인원이 바뀌어도 매번 필요한 만큼 자동 확보된다.
+  ensureGrid(d, DUTY_DATA_START_ROW + nN + 5, sumStartCol + 3);
 
   // 제목
   d.getRange(1, 1).setValue(cfg.year + '년 ' + cfg.month + '월 듀티표')
@@ -403,6 +476,7 @@ function formatLayout() {
   var nd = cfg.numDays, nN = cfg.nurses.length;
   var firstDayCol = 2;
   var sumStartCol = firstDayCol + nd;
+  ensureGrid(d, DUTY_DATA_START_ROW + nN + 5, sumStartCol + 3);
 
   // 열 너비: 이름 넓게, 날짜칸 넉넉히, 합계칸 보통
   d.setColumnWidth(1, 150);
@@ -449,6 +523,22 @@ function generateDuty() {
   if (cfg.nurses.length === 0) {
     SpreadsheetApp.getUi().alert('간호사 목록이 비어있습니다. [설정] 시트를 확인하세요.');
     return;
+  }
+  // ── 사전 인원 검증: 일수·인원·필요인원·오프 설정으로 물리적으로 채울 수 있는지 ──
+  //    부족하면 어떤 알고리즘으로도 빈칸이 남으므로, 5초 갈아넣기 전에 이유와 권장 인원을 알려준다.
+  if (!cfg.feasible) {
+    var dailyWork = cfg.need.D + cfg.need.E + cfg.need.N;
+    SpreadsheetApp.getUi().alert(
+      '⚠ 인원이 부족합니다 (빈칸 불가피)\n\n' +
+      cfg.year + '년 ' + cfg.month + '월 (' + cfg.numDays + '일)\n' +
+      '· 하루 근무 필요: ' + dailyWork + '명 (D' + cfg.need.D + '/E' + cfg.need.E + '/N' + cfg.need.N + ')\n' +
+      '· 1인 오프: 최대 ' + cfg.offMax + '일\n' +
+      '· 현재 인원: ' + cfg.nurses.length + '명  →  최소 필요: ' + cfg.minPeople + '명\n\n' +
+      '빈칸 없이 짜려면 셋 중 하나:\n' +
+      '  1) 인원을 ' + cfg.minPeople + '명 이상으로\n' +
+      '  2) 하루 필요인원(D/E/N)을 줄이기\n' +
+      '  3) 오프 최대 일수를 늘리기(현재 ' + cfg.offMax + ')\n\n' +
+      '일단 가능한 최선의 표를 만들어 드릴게요 (빈칸이 남을 수 있음).');
   }
 
   // ── 표에 직접 입력해둔 칸 읽기 + 영속 잠금 ──
@@ -501,6 +591,7 @@ function generateDuty() {
     if (best.score.total === 0) break;               // 완전 무점수 → 즉시 종료
     if (a + 1 >= minA) {                              // 최소 시도(선호 최적화) 채운 뒤:
       if (isClean(best.score)) break;                //  · 검증 통과 표 확보 → 종료 (대부분 빠름)
+      if (!cfg.feasible) break;                       //  · 인원부족(물리적 불가) → 더 굴려도 빈칸 → 시간낭비 방지
       if (new Date().getTime() - startMs > budgetMs) break; //  · 빡빡한 달은 시간예산까지 더 탐색
     }
   }
@@ -1445,8 +1536,30 @@ function roleNightCounts(cfg, idxs, total) {
   if (freeIdx.length) {
     var fa = allocByWeight(freeW, rest);
     for (var k = 0; k < freeIdx.length; k++) out[freeIdx[k]] = fa[k];
+    return out;
   }
-  return out; // 자유 인원이 없는데 잔여>0이면 합<총량 → 타일링 실패 → 그리디 폴백(의도)
+  // 자유 인원이 없는데 잔여>0 → 고정 듀티개수 합이 역할 필요 나이트(=총량)에 못 미침.
+  //   (예: 7월 31일, 차지 6명×N:5=30 < 31 / 액팅 4명×N:6=24 < 31)
+  //   예전엔 그대로 둬서 합<총량 → 타일링 실패 → 그리디 폴백(미충족·듀티개수차 발생).
+  //   매일 '차지1+액팅1' 야간 충원은 하드 제약, 시트의 N개수는 소프트 목표이므로
+  //   부족분을 나이트 가중치 비례로 고정 인원에게 올려 합=총량을 보장한다(타일링 성공).
+  if (rest > 0) {
+    // N:0을 "명시"한 사람은 나이트 면제(하드) → 충원 대상에서 제외(가중치 0).
+    //   (예: 이브닝만 받는 간호사) 나머지 인원이 부족분을 나눠 진다.
+    var w3 = [], anyNonZero = false;
+    for (j = 0; j < idxs.length; j++) {
+      var nuj = cfg.nurses[idxs[j]];
+      var hardZero = nuj.dutyCount && nuj.dutyCount.N === 0;
+      var wj = hardZero ? 0 : nightWeightOf(nuj);
+      w3.push(wj);
+      if (wj > 0) anyNonZero = true;
+    }
+    // 역할 전원이 N:0이면(나이트 설 사람이 아무도 없음) 어쩔 수 없이 전체 분배
+    if (!anyNonZero) for (j = 0; j < idxs.length; j++) w3[j] = nightWeightOf(cfg.nurses[idxs[j]]);
+    var add = allocByWeight(w3, rest);
+    for (j = 0; j < idxs.length; j++) out[j] += add[j];
+  }
+  return out;
 }
 
 /* 한 역할(차지 또는 액팅)이 nd일을 1인 1명씩 덮도록 2~3블록 타일링 → owner[1..nd] (실패 시 null)

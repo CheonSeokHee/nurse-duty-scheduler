@@ -25,6 +25,49 @@ var PREFMISS_WEIGHT_MAP = { 1: 2, 2: 3, 3: 5 };        // 약간/보통/강하�
 
 var PREF_TARGET_RATIO = { 1: 0.55, 2: 0.65, 3: 0.75 };
 
+function setupDayPicker() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var s = ss.getSheetByName(SETTINGS_SHEET);
+  if (!s) { SpreadsheetApp.getUi().alert('설정 시트가 없습니다. 먼저 [① 시트 세팅]을 실행하세요.'); return; }
+  s.getRange(2, 3).setValue('← 일수 지정(자동/28~31)').setFontWeight('bold');
+  var dayRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['자동', '28', '29', '30', '31'], true).build();
+  s.getRange(3, 3).setDataValidation(dayRule);
+  if (!s.getRange(3, 3).getValue()) s.getRange(3, 3).setValue('자동');
+  SpreadsheetApp.getActiveSpreadsheet().toast(
+    '설정 시트 C3에 일수 콤보를 추가했어요. 30/31을 직접 고른 뒤 [② 자동 배정]을 누르세요.', '듀티표', 7);
+}
+
+/* [진단] 31일 열이 안 보이는 원인 파악용 — 핵심 값을 알림창으로 표시 */
+
+function diagnose31() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var s = ss.getSheetByName(SETTINGS_SHEET);
+  var rawYear = s ? s.getRange(2, 2).getValue() : '(설정시트없음)';
+  var rawMonth = s ? s.getRange(3, 2).getValue() : '(설정시트없음)';
+  var cfg = readSettings();
+  var d = ss.getSheetByName(DUTY_SHEET);
+  var lines = [];
+  lines.push('연도셀(B2)=' + rawYear + ' / 월셀(B3)=' + rawMonth);
+  lines.push('인식한 numDays = ' + cfg.numDays + ' (31이어야 정상)');
+  if (!d) { lines.push('※ 듀티표 시트가 없습니다.'); }
+  else {
+    lines.push('듀티표 최대열 = ' + d.getMaxColumns() + ' (36 이상이어야 31일+합계 표시)');
+    lines.push('듀티표 최대행 = ' + d.getMaxRows());
+    var col31 = 2 + 31 - 1; // 31일 칸 열 = 32(AF)
+    var hdr31 = d.getRange(2, col31).getValue();
+    var first31 = d.getRange(DUTY_DATA_START_ROW, col31).getValue();
+    lines.push('헤더 31일칸(2행,32열) = "' + hdr31 + '"');
+    lines.push('첫 간호사 31일칸(4행,32열) = "' + first31 + '"');
+    var hidden = '';
+    try { hidden = d.isColumnHiddenByUser(col31) ? '예(숨김!)' : '아니오'; } catch (e) { hidden = '확인불가'; }
+    lines.push('31일 열이 숨김 상태? = ' + hidden);
+  }
+  SpreadsheetApp.getUi().alert('🔧 31일 진단\n\n' + lines.join('\n'));
+}
+
+/* ===================== 시트 세팅 ===================== */
+
 function parseReqOff(v) {
   if (!v) return {};
   var out = {};
@@ -132,6 +175,14 @@ function prefSatisfied(cfg, sched, i) {
 }
 
 /* ===================== 듀티표 템플릿 그리기 ===================== */
+/* 시트가 최소 needRows행·needCols열을 갖도록 보장 (모자라면 추가). 기본 시트는 26열뿐이라 필수. */
+
+function ensureGrid(sheet, needRows, needCols) {
+  var maxC = sheet.getMaxColumns();
+  if (maxC < needCols) sheet.insertColumnsAfter(maxC, needCols - maxC);
+  var maxR = sheet.getMaxRows();
+  if (maxR < needRows) sheet.insertRowsAfter(maxR, needRows - maxR);
+}
 
 function tryBuild(cfg, rng) {
   var nd = cfg.numDays;
@@ -982,8 +1033,30 @@ function roleNightCounts(cfg, idxs, total) {
   if (freeIdx.length) {
     var fa = allocByWeight(freeW, rest);
     for (var k = 0; k < freeIdx.length; k++) out[freeIdx[k]] = fa[k];
+    return out;
   }
-  return out; // 자유 인원이 없는데 잔여>0이면 합<총량 → 타일링 실패 → 그리디 폴백(의도)
+  // 자유 인원이 없는데 잔여>0 → 고정 듀티개수 합이 역할 필요 나이트(=총량)에 못 미침.
+  //   (예: 7월 31일, 차지 6명×N:5=30 < 31 / 액팅 4명×N:6=24 < 31)
+  //   예전엔 그대로 둬서 합<총량 → 타일링 실패 → 그리디 폴백(미충족·듀티개수차 발생).
+  //   매일 '차지1+액팅1' 야간 충원은 하드 제약, 시트의 N개수는 소프트 목표이므로
+  //   부족분을 나이트 가중치 비례로 고정 인원에게 올려 합=총량을 보장한다(타일링 성공).
+  if (rest > 0) {
+    // N:0을 "명시"한 사람은 나이트 면제(하드) → 충원 대상에서 제외(가중치 0).
+    //   (예: 이브닝만 받는 간호사) 나머지 인원이 부족분을 나눠 진다.
+    var w3 = [], anyNonZero = false;
+    for (j = 0; j < idxs.length; j++) {
+      var nuj = cfg.nurses[idxs[j]];
+      var hardZero = nuj.dutyCount && nuj.dutyCount.N === 0;
+      var wj = hardZero ? 0 : nightWeightOf(nuj);
+      w3.push(wj);
+      if (wj > 0) anyNonZero = true;
+    }
+    // 역할 전원이 N:0이면(나이트 설 사람이 아무도 없음) 어쩔 수 없이 전체 분배
+    if (!anyNonZero) for (j = 0; j < idxs.length; j++) w3[j] = nightWeightOf(cfg.nurses[idxs[j]]);
+    var add = allocByWeight(w3, rest);
+    for (j = 0; j < idxs.length; j++) out[j] += add[j];
+  }
+  return out;
 }
 
 /* 한 역할(차지 또는 액팅)이 nd일을 1인 1명씩 덮도록 2~3블록 타일링 → owner[1..nd] (실패 시 null)
@@ -1653,5 +1726,5 @@ function evaluate(cfg, sched) {
 /* ===================== 시트에 기록 ===================== */
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { SHIFT, WORK_SHIFTS, PREF_DAY_SORT, NIGHT_STRENGTH_MAP, PREFMISS_WEIGHT_MAP, PREF_TARGET_RATIO, parseReqOff, parseDutyCount, minDayKey, parsePref, dayPrefRank, parsePrefStrength, nightWeightOf, prefMissWeightOf, countNurseShift, prefTargetCount, prefSatisfied, tryBuild, convertOverstaffToS, assignSupport, repairHardViolations, repairStaffing, limitConsecutiveOff, breakOffRuns, swapOffOut, countOffRow, lockNightOff, nightArrangementOK, fixNightCounts, nightBlocksOf, rebuildNightOffs, canHostNightBlock, enforceFirstOffNight, isLocked, chooseFillShift, topUpUnderworked, rotateShiftDeadlocks, countChargeOnShift, makesLongOff, assignNights, offAfterFor, splitNightBlocks, shuffleArr, allocByWeight, roleNightCounts, tileNightRole, tileNightRoleAligned, constructNights, assignNightsGreedy, placeNight, pickWindowNurse, fillDayEvening, countEligible, fillDayShift, pickDayCandidate, fullWorkload, canWork, countShift, shiftHasCharge, workloadUpTo, makeRng, evaluate };
+  module.exports = { SHIFT, WORK_SHIFTS, PREF_DAY_SORT, NIGHT_STRENGTH_MAP, PREFMISS_WEIGHT_MAP, PREF_TARGET_RATIO, setupDayPicker, diagnose31, parseReqOff, parseDutyCount, minDayKey, parsePref, dayPrefRank, parsePrefStrength, nightWeightOf, prefMissWeightOf, countNurseShift, prefTargetCount, prefSatisfied, ensureGrid, tryBuild, convertOverstaffToS, assignSupport, repairHardViolations, repairStaffing, limitConsecutiveOff, breakOffRuns, swapOffOut, countOffRow, lockNightOff, nightArrangementOK, fixNightCounts, nightBlocksOf, rebuildNightOffs, canHostNightBlock, enforceFirstOffNight, isLocked, chooseFillShift, topUpUnderworked, rotateShiftDeadlocks, countChargeOnShift, makesLongOff, assignNights, offAfterFor, splitNightBlocks, shuffleArr, allocByWeight, roleNightCounts, tileNightRole, tileNightRoleAligned, constructNights, assignNightsGreedy, placeNight, pickWindowNurse, fillDayEvening, countEligible, fillDayShift, pickDayCandidate, fullWorkload, canWork, countShift, shiftHasCharge, workloadUpTo, makeRng, evaluate };
 }
