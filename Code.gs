@@ -1082,7 +1082,7 @@ function nightArrangementOK(cfg, sched, i) {
     if (sched[i][d] === 'N' && sched[i][d - 1] !== 'N') {
       var len = 0; while (sched[i][d + len] === 'N') len++;
       if (len > mx || len > cfg.nightLen) return false;
-      if (len === 1 && mx >= 3) return false;                 // 1박 금지(단, 최대2인 편혜경·박수진은 1~2 허용)
+      if (len === 1) return false;                            // 1박 금지(전원 — 편혜경·박수진 포함)
     }
     if ((sched[i][d] === 'D' || sched[i][d] === 'E' || sched[i][d] === 'S') && sched[i][d - 1] === 'N') return false;
   }
@@ -1169,7 +1169,7 @@ function canHostNightBlock(cfg, sched, i, s, e) {
   if (s < 1 || e > nd || len < 1 || len > cfg.nightLen) return false;
   var mxI = cfg.nurses[i].nightMaxLen || cfg.nightLen;
   if (len > mxI) return false;                               // 사람별 최대연속 존중
-  if (len === 1 && mxI >= 3) return false;                   // 1박 금지(최대2인 편혜경·박수진만 1~2 허용)
+  if (len === 1) return false;                               // 1박 금지(전원 — 편혜경·박수진 포함)
   for (var d = s; d <= e; d++) if (sched[i][d] !== '') return false;
   var obn = (len >= cfg.nightLen) ? cfg.offBeforeNight : 0;
   for (var b = 1; b <= obn; b++) {
@@ -1471,12 +1471,12 @@ function offAfterFor(cfg, blockLen) {
 function splitNightBlocks(T, rng, maxLen, prefer3) {
   if (T <= 0) return [];
   var mx = maxLen || 3;
-  if (mx <= 2) {                                             // 편혜경·박수진: 2씩 + 자투리(1 허용)
-    var b2 = [], r2 = T;
-    while (r2 > 0) { var s2 = Math.min(2, r2); b2.push(s2); r2 -= s2; } // 예: 5 → [2,2,1]
+  if (mx <= 2) {                                             // 편혜경·박수진: 오직 2박만 (1박 금지)
+    if (T % 2 === 1) return null;                            // 홀수는 2박으로 못 깜 → 폴백(나이트수는 짝수로 정규화됨)
+    var b2 = []; for (var r2 = T; r2 > 0; r2 -= 2) b2.push(2); // 예: 6 → [2,2,2]
     return b2;
   }
-  if (T === 1) return [1];                                   // 목표가 1박뿐이면 분해 불가(드묾)
+  if (T === 1) return null;                                  // 1박뿐 = 1박 블록 → 금지(폴백 유도)
   var b = [], r = T;
   if (prefer3) {                                             // 액팅: 3연속 위주, 1박 금지
     while (r >= 3) { b.push(3); r -= 3; }
@@ -1531,12 +1531,12 @@ function roleNightCounts(cfg, idxs, total) {
   if (rest < 0) { // 지정 합이 역할 총량 초과(입력 과다) → 전체 비례 축소
     var w2 = [];
     for (j = 0; j < idxs.length; j++) w2.push(out[j] > 0 ? out[j] : 0);
-    return allocByWeight(w2, total);
+    return normalizeNightCounts(cfg, idxs, allocByWeight(w2, total));
   }
   if (freeIdx.length) {
     var fa = allocByWeight(freeW, rest);
     for (var k = 0; k < freeIdx.length; k++) out[freeIdx[k]] = fa[k];
-    return out;
+    return normalizeNightCounts(cfg, idxs, out);
   }
   // 자유 인원이 없는데 잔여>0 → 고정 듀티개수 합이 역할 필요 나이트(=총량)에 못 미침.
   //   (예: 7월 31일, 차지 6명×N:5=30 < 31 / 액팅 4명×N:6=24 < 31)
@@ -1558,6 +1558,41 @@ function roleNightCounts(cfg, idxs, total) {
     if (!anyNonZero) for (j = 0; j < idxs.length; j++) w3[j] = nightWeightOf(cfg.nurses[idxs[j]]);
     var add = allocByWeight(w3, rest);
     for (j = 0; j < idxs.length; j++) out[j] += add[j];
+  }
+  return normalizeNightCounts(cfg, idxs, out);
+}
+
+/* 1박 방지용 나이트 수 정규화 (역할 그룹 내, 합 보존):
+   "좋은" 나이트 수 = 0, 또는 ≥2이며 (최대3박↑은 아무 값 / 최대2박은 짝수).
+   "나쁜" 수 = 1(누구든 1박 강제), 또는 최대2박인데 홀수.
+   나쁜 사람을 ±1 조정하고, 합 유지를 위해 다른 사람을 반대로 ±1(조정 후에도 좋은 상태) 짝지운다.
+   (예: 박수진5·편혜경5 → 박수진6·편혜경4 / 또는 max3↑ 동료가 한 개 흡수) */
+function normalizeNightCounts(cfg, idxs, out) {
+  var n = idxs.length;
+  if (!n) return out;
+  function mx(k) { return cfg.nurses[idxs[k]].nightMaxLen || cfg.nightLen || 3; }
+  function good(k, c) { if (c < 0) return false; if (c === 1) return false; if (mx(k) <= 2 && (c % 2) === 1) return false; return true; }
+  function bad(k) { return !good(k, out[k]); }
+  var guard = 0;
+  while (guard++ < n * 4) {
+    var k = -1;
+    for (var i = 0; i < n; i++) if (bad(i)) { k = i; break; }
+    if (k < 0) break;                                  // 전원 정상
+    var fixed = false;
+    var dirs = [1, -1];                                // 올림 우선(요청 나이트 수 최대한 보장)
+    for (var di = 0; di < dirs.length && !fixed; di++) {
+      var dk = dirs[di];
+      if (!good(k, out[k] + dk)) continue;
+      for (var j = 0; j < n; j++) {                    // 합 보존: 반대 방향으로 받아줄 동료
+        if (j === k) continue;
+        if (good(j, out[j] - dk)) { out[k] += dk; out[j] -= dk; fixed = true; break; }
+      }
+    }
+    if (!fixed) {                                      // 동료 없음 → 1박 방지 우선(합 ±1은 충원/폴백이 흡수)
+      if (good(k, out[k] + 1)) out[k] += 1;
+      else if (good(k, out[k] - 1)) out[k] -= 1;
+      else out[k] = 0;
+    }
   }
   return out;
 }
@@ -1640,7 +1675,7 @@ function tileNightRoleAligned(nd, idxs, rng, counts, cfg, sched) {
       var c = cands[ci], mx = mxK[c];
       var isCharge = cfg.nurses[idxs[c]].charge;
       var sizes = isCharge ? [3, 2] : [3];   // 액팅=3연속만 / 차지=3 또는 2 (큰 블록 우선)
-      if (mx < 3) sizes = isCharge ? [2, 1] : [];   // 나이트최대<3 특례(편혜경·박수진): 2박+자투리1 허용, 액팅은 해당없음
+      if (mx < 3) sizes = isCharge ? [2] : [];       // 나이트최대<3(편혜경·박수진): 2박만 (1박 금지)
       for (var si = 0; si < sizes.length; si++) {
         var sz = sizes[si];
         if (sz > mx || sz > rem[c]) continue;
@@ -2266,9 +2301,11 @@ function checkRules() {
         // 블록 시작
         var len = 0; while (get(ii, day2 + len) === 'N') len++;
         var endDay = day2 + len - 1;
-        var nMax = cfg.nightLen; // 1~maxLen 허용 (1일 나이트 OK)
-        if (len > nMax && endDay < nd) // 월말 잘림은 예외
-          flag(ii, day2, '나이트 연속 ' + len + '일 (최대 ' + nMax + ')');
+        var nMaxC = cfg.nurses[ii].nightMaxLen || cfg.nightLen; // 사람별 최대연속(편혜경·박수진=2)
+        if (len > nMaxC && endDay < nd) // 월말 잘림은 예외
+          flag(ii, day2, '나이트 연속 ' + len + '일 (최대 ' + nMaxC + ')');
+        if (len === 1) // 1박(단일) 나이트 금지 — 빨강으로 표시
+          flag(ii, day2, '나이트 1박(단일) 금지 — 최소 2박');
         // 시작 전 오프 (3연속 블록일 때만)
         var obn2 = (len >= cfg.nightLen) ? cfg.offBeforeNight : 0;
         for (var b = 1; b <= obn2; b++) {
