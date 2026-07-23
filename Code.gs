@@ -1635,11 +1635,18 @@ function allocByWeight(weights, total) {
   return floors;
 }
 
-/* 나이트 슬롯 배정용 역할 — 박지연은 차지 자격이나 나이트는 '보조(액팅)'로만 배정한다.
-   (수정사항 7.21 ① : 항상 선배 차지와 함께 근무 → 나이트 5개 보조. 듀티표엔 차지/보조
-    라벨이 표시되지 않으므로 '팀차지 1개'는 수간호사가 원하는 밤을 지정하면 된다.)
+/* 나이트 슬롯 배정용 역할 — 박지연은 '31일 달에서만' 나이트를 '보조(액팅)'로만 배정한다.
+   (수정사항 7.21 ① : 31일 달 나이트 6개 中 5개 보조 → 항상 선배 차지와 함께 근무.
+    듀티표엔 차지/보조 라벨이 없으므로 '팀차지 1개'는 수간호사가 원하는 밤을 지정.
+    30일 이하 달은 일반 차지로 배정.)
    ※ "매 근무 차지 1명 이상" 커버리지 검사는 그대로 .charge 를 쓴다(박지연도 차지로 카운트). */
-function isNightCharge(nu) { return !!nu && !!nu.charge && nu.name !== '박지연'; }
+function isNightCharge(nu, cfg) {
+  if (!nu || !nu.charge) return false;
+  // 박지연은 31일 달에서만 나이트 '보조(액팅)' 전담 (6개 中 5개 액팅 / 1개 팀차지는 수동 지정).
+  //   30일 이하 달에서는 일반 차지로 나이트 배정.
+  if (nu.name === '박지연' && cfg && cfg.numDays === 31) return false;
+  return true;
+}
 
 /* 역할 그룹(idxs)의 1인당 나이트 수 배분 — 듀티 개수(N:n) 지정자는 그 수를 "고정"하고
    나머지 인원이 잔여분을 선호 가중치로 나눠 갖는다. (지정 합이 총량 초과면 비례 축소) */
@@ -1826,7 +1833,7 @@ function tileNightRoleAligned(nd, idxs, rng, counts, cfg, sched) {
 /* 정확 구성: 차지/액팅 각각 타일링 → 매 밤 차지1+액팅1, 전원 정확히 목표 나이트. 전후 오프 부여 */
 function constructNights(cfg, sched, rng) {
   var nd = cfg.numDays, N = cfg.nurses.length, charges = [], actings = [];
-  for (var i = 0; i < N; i++) isNightCharge(cfg.nurses[i]) ? charges.push(i) : actings.push(i);
+  for (var i = 0; i < N; i++) isNightCharge(cfg.nurses[i], cfg) ? charges.push(i) : actings.push(i);
   if (!charges.length || !actings.length) return false;
   // 1인당 나이트 수: 듀티 개수(N:n) 지정자는 고정, 나머지는 선호 가중치 분배 (역할 합 = nd)
   var cCounts = roleNightCounts(cfg, charges, nd);
@@ -1891,7 +1898,7 @@ function constructNights(cfg, sched, rng) {
     for (var i = 0; i < N; i++) {
       var a = cfg.anchorNext[i];
       if (!a || a > nd) continue;
-      var own = isNightCharge(cfg.nurses[i]) ? co : ao;     // 유효 타일링은 리퀘스트오프 날 N을 안 줌 → own[a]===i면 블록 시작
+      var own = isNightCharge(cfg.nurses[i], cfg) ? co : ao;     // 유효 타일링은 리퀘스트오프 날 N을 안 줌 → own[a]===i면 블록 시작
       if (own[a] === i) sc++;
     }
     return sc;
@@ -1943,7 +1950,7 @@ function assignNightsGreedy(cfg, sched, rng) {
 
   // ── 역할별 나이트 목표 계산 (액팅 6 고정, 차지 = 나머지) ──
   var chargeCount = 0, actingCount = 0;
-  for (var ri = 0; ri < N; ri++) { if (isNightCharge(cfg.nurses[ri])) chargeCount++; else actingCount++; }
+  for (var ri = 0; ri < N; ri++) { if (isNightCharge(cfg.nurses[ri], cfg)) chargeCount++; else actingCount++; }
   var totalSlots = cfg.need.N * nd;                 // 한 달 전체 나이트 자리
   var maxActingTotal = (cfg.need.N - 1) * nd;       // 매 밤 차지 1명 확보 후 액팅이 가질 수 있는 최대
   var idealActing = actingCount * (cfg.actingNightTarget || 6); // 액팅 1인 목표(기본 6)
@@ -1953,13 +1960,13 @@ function assignNightsGreedy(cfg, sched, rng) {
   var actingTarget = actingCount > 0 ? actingTotal / actingCount : 0;
   var chargeTarget = chargeCount > 0 ? chargeTotal / chargeCount : 0;
   var nightTarget = [];
-  for (var ti = 0; ti < N; ti++) nightTarget[ti] = isNightCharge(cfg.nurses[ti]) ? chargeTarget : actingTarget;
+  for (var ti = 0; ti < N; ti++) nightTarget[ti] = isNightCharge(cfg.nurses[ti], cfg) ? chargeTarget : actingTarget;
 
   // ── 역할 그룹 내 목표 재분배: 듀티 개수(N:n) 지정자는 고정, 나머지는 선호 가중치 ──
   //    그룹 합을 그대로 두므로 매 밤 인원/차지 커버리지는 변하지 않음(빈칸 안 생김).
   [true, false].forEach(function (isCharge) {
     var grp = [], sum = 0;
-    for (var gi = 0; gi < N; gi++) if (isNightCharge(cfg.nurses[gi]) === isCharge) { grp.push(gi); sum += nightTarget[gi]; }
+    for (var gi = 0; gi < N; gi++) if (isNightCharge(cfg.nurses[gi], cfg) === isCharge) { grp.push(gi); sum += nightTarget[gi]; }
     if (!grp.length || sum <= 0) return;
     var counts = roleNightCounts(cfg, grp, Math.round(sum));
     for (var ki = 0; ki < grp.length; ki++) nightTarget[grp[ki]] = counts[ki];
@@ -2034,7 +2041,7 @@ function placeNight(cfg, sched, i, start, end) {
 function pickWindowNurse(cfg, sched, start, end, winSize, thisNights, sizeCount, nightTarget, requireCharge, respectTarget, rng) {
   var N = cfg.nurses.length, pool = [];
   for (var i = 0; i < N; i++) {
-    if (requireCharge && !isNightCharge(cfg.nurses[i])) continue;
+    if (requireCharge && !isNightCharge(cfg.nurses[i], cfg)) continue;
     // 사람별 나이트 최대연속 초과 윈도우는 그 사람에게 배정 안 함 (편혜경·박수진=2)
     if (winSize > (cfg.nurses[i].nightMaxLen || cfg.nightLen)) continue;
     // 목표 초과 방지 (폴백 땐 무시)
