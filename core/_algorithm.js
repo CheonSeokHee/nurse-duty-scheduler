@@ -8,6 +8,8 @@
  */
 /* eslint-disable */
 
+var PREV_DUTY_SHEET = '전월 듀티표'; // 직전월 스냅샷 — 마지막날 듀티를 읽어 이번달 1일과 연결
+
 var SHIFT = { D: 'D', E: 'E', N: 'N', O: 'O' };
 
 var WORK_SHIFTS = ['D', 'E', 'N'];
@@ -29,13 +31,20 @@ function setupDayPicker() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var s = ss.getSheetByName(SETTINGS_SHEET);
   if (!s) { SpreadsheetApp.getUi().alert('설정 시트가 없습니다. 먼저 [① 시트 세팅]을 실행하세요.'); return; }
-  s.getRange(2, 3).setValue('← 일수 지정(자동/28~31)').setFontWeight('bold');
+  // 월(B3) 드롭다운(1~12)
+  var monthRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'], true).build();
+  s.getRange(3, 2).setDataValidation(monthRule);
+  // 일수(C3) 콤보 + 현재 연/월로 자동 채움
+  s.getRange(2, 3).setValue('← 일수(월 선택 시 자동)').setFontWeight('bold');
   var dayRule = SpreadsheetApp.newDataValidation()
     .requireValueInList(['자동', '28', '29', '30', '31'], true).build();
   s.getRange(3, 3).setDataValidation(dayRule);
-  if (!s.getRange(3, 3).getValue()) s.getRange(3, 3).setValue('자동');
+  syncDaysCell(s);
+  // 전월 마지막날 듀티 헤더로 갱신 (기존 '전월 나이트(일)' → 의미 변경)
+  s.getRange(NURSE_START_ROW, 5).setValue('전월 마지막날 듀티(D/E/N/O)');
   SpreadsheetApp.getActiveSpreadsheet().toast(
-    '설정 시트 C3에 일수 콤보를 추가했어요. 30/31을 직접 고른 뒤 [② 자동 배정]을 누르세요.', '듀티표', 7);
+    '월(B3) 콤보 추가 — 월을 고르면 일수(C3)가 자동 반영됩니다. 명단 5열은 "전월 마지막날 듀티(D/E/N/O)"로 바뀌었어요.', '듀티표', 8);
 }
 
 /* [진단] 31일 열이 안 보이는 원인 파악용 — 핵심 값을 알림창으로 표시 */
@@ -202,6 +211,9 @@ function tryBuild(cfg, rng) {
       var oi = parseInt(od, 10);
       if (oi >= 1 && oi <= nd && !sched[i2][oi]) sched[i2][oi] = SHIFT.O;
     }
+    // 전월 마지막날 듀티를 day 0(가상)에 심어 1일차 경계 제약(금지패턴 N→D/E, E→D)을
+    //   repairHardViolations가 잡게 한다. (나이트 후 오프는 readSettings에서 reqOff로 영구 고정)
+    if (nu.prevLastDuty) sched[i2][0] = nu.prevLastDuty;
     // 표에 직접 입력해둔 칸(preset)도 고정
     if (cfg.preset && cfg.preset[i2]) {
       for (var pd in cfg.preset[i2]) {
@@ -223,7 +235,13 @@ function tryBuild(cfg, rng) {
   cfg.forcedNight = [];
   cfg.anchorNext = []; // 첫 리퀘스트 오프 "다음날" (나이트 앵커)
   for (var fi = 0; fi < N; fi++) {
-    var firstOff = minDayKey(cfg.nurses[fi].reqOff);
+    // 경계 오프(전월 나이트 후 오프)는 앵커 대상이 아님 → 실제 요청오프 중 최소일만 사용
+    var firstOff = 0, bdy = cfg.nurses[fi].bdyOff;
+    for (var rok in cfg.nurses[fi].reqOff) {
+      var rod = parseInt(rok, 10);
+      if (bdy && bdy[rod]) continue;
+      if (rod >= 1 && (firstOff === 0 || rod < firstOff)) firstOff = rod;
+    }
     if (cfg.preset && cfg.preset[fi]) { // 표에 직접 친 O(수기 리퀘스트)도 포함
       for (var pok in cfg.preset[fi]) {
         if (cfg.preset[fi][pok] !== 'O') continue;
@@ -367,8 +385,8 @@ function repairHardViolations(cfg, sched) {
   for (var i = 0; i < N; i++) {
     for (var pass = 0; pass < 5; pass++) {
       var changed = false;
-      // N 다음날 D/E, E 다음날 D → 뒷 칸(원인) 제거
-      for (var d = 2; d <= nd; d++) {
+      // N 다음날 D/E, E 다음날 D → 뒷 칸(원인) 제거. d=1은 전월 마지막날(sched[i][0])과 비교.
+      for (var d = 1; d <= nd; d++) {
         var cur = sched[i][d], pv = sched[i][d - 1];
         var bad = ((cur === 'D' || cur === 'E') && pv === 'N') || (cur === 'D' && pv === 'E');
         if (bad && cur !== 'O' && !isLocked(cfg, i, d)) { sched[i][d] = 'O'; changed = true; }
@@ -1012,6 +1030,13 @@ function allocByWeight(weights, total) {
   return floors;
 }
 
+/* 나이트 슬롯 배정용 역할 — 박지연은 차지 자격이나 나이트는 '보조(액팅)'로만 배정한다.
+   (수정사항 7.21 ① : 항상 선배 차지와 함께 근무 → 나이트 5개 보조. 듀티표엔 차지/보조
+    라벨이 표시되지 않으므로 '팀차지 1개'는 수간호사가 원하는 밤을 지정하면 된다.)
+   ※ "매 근무 차지 1명 이상" 커버리지 검사는 그대로 .charge 를 쓴다(박지연도 차지로 카운트). */
+
+function isNightCharge(nu) { return !!nu && !!nu.charge && nu.name !== '박지연'; }
+
 /* 역할 그룹(idxs)의 1인당 나이트 수 배분 — 듀티 개수(N:n) 지정자는 그 수를 "고정"하고
    나머지 인원이 잔여분을 선호 가중치로 나눠 갖는다. (지정 합이 총량 초과면 비례 축소) */
 
@@ -1064,6 +1089,7 @@ function roleNightCounts(cfg, idxs, total) {
    "나쁜" 수 = 1(누구든 1박 강제), 또는 최대2박인데 홀수.
    나쁜 사람을 ±1 조정하고, 합 유지를 위해 다른 사람을 반대로 ±1(조정 후에도 좋은 상태) 짝지운다.
    (예: 박수진5·편혜경5 → 박수진6·편혜경4 / 또는 max3↑ 동료가 한 개 흡수) */
+
 function normalizeNightCounts(cfg, idxs, out) {
   var n = idxs.length;
   if (!n) return out;
@@ -1201,7 +1227,7 @@ function tileNightRoleAligned(nd, idxs, rng, counts, cfg, sched) {
 
 function constructNights(cfg, sched, rng) {
   var nd = cfg.numDays, N = cfg.nurses.length, charges = [], actings = [];
-  for (var i = 0; i < N; i++) cfg.nurses[i].charge ? charges.push(i) : actings.push(i);
+  for (var i = 0; i < N; i++) isNightCharge(cfg.nurses[i]) ? charges.push(i) : actings.push(i);
   if (!charges.length || !actings.length) return false;
   // 1인당 나이트 수: 듀티 개수(N:n) 지정자는 고정, 나머지는 선호 가중치 분배 (역할 합 = nd)
   var cCounts = roleNightCounts(cfg, charges, nd);
@@ -1266,7 +1292,7 @@ function constructNights(cfg, sched, rng) {
     for (var i = 0; i < N; i++) {
       var a = cfg.anchorNext[i];
       if (!a || a > nd) continue;
-      var own = cfg.nurses[i].charge ? co : ao;     // 유효 타일링은 리퀘스트오프 날 N을 안 줌 → own[a]===i면 블록 시작
+      var own = isNightCharge(cfg.nurses[i]) ? co : ao;     // 유효 타일링은 리퀘스트오프 날 N을 안 줌 → own[a]===i면 블록 시작
       if (own[a] === i) sc++;
     }
     return sc;
@@ -1319,7 +1345,7 @@ function assignNightsGreedy(cfg, sched, rng) {
 
   // ── 역할별 나이트 목표 계산 (액팅 6 고정, 차지 = 나머지) ──
   var chargeCount = 0, actingCount = 0;
-  for (var ri = 0; ri < N; ri++) { if (cfg.nurses[ri].charge) chargeCount++; else actingCount++; }
+  for (var ri = 0; ri < N; ri++) { if (isNightCharge(cfg.nurses[ri])) chargeCount++; else actingCount++; }
   var totalSlots = cfg.need.N * nd;                 // 한 달 전체 나이트 자리
   var maxActingTotal = (cfg.need.N - 1) * nd;       // 매 밤 차지 1명 확보 후 액팅이 가질 수 있는 최대
   var idealActing = actingCount * (cfg.actingNightTarget || 6); // 액팅 1인 목표(기본 6)
@@ -1329,13 +1355,13 @@ function assignNightsGreedy(cfg, sched, rng) {
   var actingTarget = actingCount > 0 ? actingTotal / actingCount : 0;
   var chargeTarget = chargeCount > 0 ? chargeTotal / chargeCount : 0;
   var nightTarget = [];
-  for (var ti = 0; ti < N; ti++) nightTarget[ti] = cfg.nurses[ti].charge ? chargeTarget : actingTarget;
+  for (var ti = 0; ti < N; ti++) nightTarget[ti] = isNightCharge(cfg.nurses[ti]) ? chargeTarget : actingTarget;
 
   // ── 역할 그룹 내 목표 재분배: 듀티 개수(N:n) 지정자는 고정, 나머지는 선호 가중치 ──
   //    그룹 합을 그대로 두므로 매 밤 인원/차지 커버리지는 변하지 않음(빈칸 안 생김).
   [true, false].forEach(function (isCharge) {
     var grp = [], sum = 0;
-    for (var gi = 0; gi < N; gi++) if (cfg.nurses[gi].charge === isCharge) { grp.push(gi); sum += nightTarget[gi]; }
+    for (var gi = 0; gi < N; gi++) if (isNightCharge(cfg.nurses[gi]) === isCharge) { grp.push(gi); sum += nightTarget[gi]; }
     if (!grp.length || sum <= 0) return;
     var counts = roleNightCounts(cfg, grp, Math.round(sum));
     for (var ki = 0; ki < grp.length; ki++) nightTarget[grp[ki]] = counts[ki];
@@ -1412,7 +1438,7 @@ function placeNight(cfg, sched, i, start, end) {
 function pickWindowNurse(cfg, sched, start, end, winSize, thisNights, sizeCount, nightTarget, requireCharge, respectTarget, rng) {
   var N = cfg.nurses.length, pool = [];
   for (var i = 0; i < N; i++) {
-    if (requireCharge && !cfg.nurses[i].charge) continue;
+    if (requireCharge && !isNightCharge(cfg.nurses[i])) continue;
     // 사람별 나이트 최대연속 초과 윈도우는 그 사람에게 배정 안 함 (편혜경·박수진=2)
     if (winSize > (cfg.nurses[i].nightMaxLen || cfg.nightLen)) continue;
     // 목표 초과 방지 (폴백 땐 무시)
@@ -1466,9 +1492,7 @@ function pickWindowNurse(cfg, sched, start, end, winSize, thisNights, sizeCount,
     // 1-b) 같은 길이 블록을 두 번 안 하도록 → 2일+3일=5로 딱 떨어지게 (4·6 변동 방지)
     var sa = (sizeCount[a][winSize] || 0), sb = (sizeCount[b][winSize] || 0);
     if (sa !== sb) return sa - sb;
-    // 2) 전월 나이트 적은 사람 → 동률 랜덤 (캐리오버 공평)
-    var na = cfg.nurses[a].prevNightDays || 0, nb = cfg.nurses[b].prevNightDays || 0;
-    if (na !== nb) return na - nb;
+    // 2) 동률 랜덤
     return rng() - 0.5;
   });
   return pool[0];
@@ -1761,5 +1785,5 @@ function evaluate(cfg, sched) {
 /* ===================== 시트에 기록 ===================== */
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { SHIFT, WORK_SHIFTS, PREF_DAY_SORT, NIGHT_STRENGTH_MAP, PREFMISS_WEIGHT_MAP, PREF_TARGET_RATIO, setupDayPicker, diagnose31, parseReqOff, parseDutyCount, minDayKey, parsePref, dayPrefRank, parsePrefStrength, nightWeightOf, prefMissWeightOf, countNurseShift, prefTargetCount, prefSatisfied, ensureGrid, tryBuild, convertOverstaffToS, assignSupport, repairHardViolations, repairStaffing, limitConsecutiveOff, breakOffRuns, swapOffOut, countOffRow, lockNightOff, nightArrangementOK, fixNightCounts, nightBlocksOf, rebuildNightOffs, canHostNightBlock, enforceFirstOffNight, isLocked, chooseFillShift, topUpUnderworked, rotateShiftDeadlocks, countChargeOnShift, makesLongOff, assignNights, offAfterFor, splitNightBlocks, shuffleArr, allocByWeight, roleNightCounts, tileNightRole, tileNightRoleAligned, constructNights, assignNightsGreedy, placeNight, pickWindowNurse, fillDayEvening, countEligible, fillDayShift, pickDayCandidate, fullWorkload, canWork, countShift, shiftHasCharge, workloadUpTo, makeRng, evaluate };
+  module.exports = { PREV_DUTY_SHEET, SHIFT, WORK_SHIFTS, PREF_DAY_SORT, NIGHT_STRENGTH_MAP, PREFMISS_WEIGHT_MAP, PREF_TARGET_RATIO, setupDayPicker, diagnose31, parseReqOff, parseDutyCount, minDayKey, parsePref, dayPrefRank, parsePrefStrength, nightWeightOf, prefMissWeightOf, countNurseShift, prefTargetCount, prefSatisfied, ensureGrid, tryBuild, convertOverstaffToS, assignSupport, repairHardViolations, repairStaffing, limitConsecutiveOff, breakOffRuns, swapOffOut, countOffRow, lockNightOff, nightArrangementOK, fixNightCounts, nightBlocksOf, rebuildNightOffs, canHostNightBlock, enforceFirstOffNight, isLocked, chooseFillShift, topUpUnderworked, rotateShiftDeadlocks, countChargeOnShift, makesLongOff, assignNights, offAfterFor, splitNightBlocks, shuffleArr, allocByWeight, isNightCharge, roleNightCounts, normalizeNightCounts, tileNightRole, tileNightRoleAligned, constructNights, assignNightsGreedy, placeNight, pickWindowNurse, fillDayEvening, countEligible, fillDayShift, pickDayCandidate, fullWorkload, canWork, countShift, shiftHasCharge, workloadUpTo, makeRng, evaluate };
 }

@@ -37,14 +37,23 @@ function buildConfig(input) {
     let nMax = parseInt(n.nightMax, 10);
     if (!(nMax >= 1)) nMax = cfg.nightLen;
     nMax = Math.min(nMax, cfg.nightLen);
-    const prevNightDays = Number(n.prevNightDays) || 0;
+    let prevLastDuty = (n.prevLastDuty || '').toString().trim().toUpperCase();
+    if (['D', 'E', 'N', 'O'].indexOf(prevLastDuty) < 0) prevLastDuty = '';
+    const reqOff = typeof n.reqOff === 'object' && n.reqOff !== null ? n.reqOff : A.parseReqOff(n.reqOff);
+    // 전월 마지막날이 나이트면 → 이번달 시작에 나이트 후 오프를 요청오프로 영구 고정(앵커는 bdyOff로 제외)
+    let bdyOff = null;
+    if (prevLastDuty === 'N') {
+      const offN0 = Math.max(1, cfg.offAfterNight || 2);
+      bdyOff = {};
+      for (let pk0 = 1; pk0 <= offN0; pk0++) { reqOff[pk0] = true; bdyOff[pk0] = true; }
+    }
     return {
       name: (n.name || '').toString().trim(),
       charge: role === '차지' || role === 'charge' || n.charge === true,
-      reqOff: typeof n.reqOff === 'object' && n.reqOff !== null ? n.reqOff : A.parseReqOff(n.reqOff),
+      reqOff: reqOff,
+      bdyOff: bdyOff,
       dutyCount: typeof n.dutyCount === 'object' && n.dutyCount !== null ? n.dutyCount : A.parseDutyCount(n.dutyCount),
-      prevNightDays: prevNightDays,
-      prevBlocks: Math.round(prevNightDays / (cfg.nightLen || 3)),
+      prevLastDuty: prevLastDuty,
       prefShift: n.prefShift && /^[DEN]$/.test(n.prefShift) ? n.prefShift : A.parsePref(n.prefShift),
       prefStrength: numOr(n.prefStrength, 2),
       nightMaxLen: nMax,

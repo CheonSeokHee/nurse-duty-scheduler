@@ -23,6 +23,7 @@
 /* ===================== 상수 ===================== */
 var SETTINGS_SHEET = '설정';
 var DUTY_SHEET = '듀티표';
+var PREV_DUTY_SHEET = '전월 듀티표'; // 직전월 스냅샷 — 마지막날 듀티를 읽어 이번달 1일과 연결
 
 var SHIFT = { D: 'D', E: 'E', N: 'N', O: 'O' };
 var WORK_SHIFTS = ['D', 'E', 'N'];
@@ -62,24 +63,52 @@ function onOpen() {
     .addSeparator()
     .addItem('수기 입력 잠금 해제(전체 새로 짜기)', 'resetPresetLock')
     .addItem('표 내용만 비우기', 'clearDutyValues')
-    .addItem('📅 일수 콤보 추가(30/31 직접선택)', 'setupDayPicker')
+    .addItem('📅 설정 보강(월 콤보·일수 자동·전월듀티 헤더)', 'setupDayPicker')
     .addSeparator()
     .addItem('🔧 진단(31일 안 보일 때)', 'diagnose31')
     .addToUi();
 }
 
-/* 기존 설정 시트에 '일수 직접지정' 콤보(C3)를 비파괴로 추가 — 데이터 안 지움 */
+/* 연/월(B2·B3)로 일수를 계산해 C3에 채운다. (월 콤보와 onEdit가 함께 사용) */
+function syncDaysCell(s) {
+  var year = parseInt(s.getRange(2, 2).getValue(), 10);
+  var month = parseInt(s.getRange(3, 2).getValue(), 10);
+  if (year >= 1900 && month >= 1 && month <= 12) {
+    var days = new Date(year, month, 0).getDate(); // 그 달의 마지막 날짜 = 총 일수
+    s.getRange(3, 3).setValue(String(days));
+  }
+}
+
+/* [단순 트리거] 설정 시트에서 연도(B2)·월(B3)을 바꾸면 일수(C3)를 자동 갱신 */
+function onEdit(e) {
+  try {
+    if (!e || !e.range) return;
+    var s = e.range.getSheet();
+    if (s.getName() !== SETTINGS_SHEET) return;
+    var r = e.range.getRow(), c = e.range.getColumn();
+    if (c === 2 && (r === 2 || r === 3)) syncDaysCell(s); // 연도·월 칸
+  } catch (err) { /* 트리거는 조용히 실패 */ }
+}
+
+/* 기존 설정 시트에 월 콤보(B3)·일수 콤보(C3)·전월듀티 헤더를 비파괴로 보강 — 데이터 안 지움 */
 function setupDayPicker() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var s = ss.getSheetByName(SETTINGS_SHEET);
   if (!s) { SpreadsheetApp.getUi().alert('설정 시트가 없습니다. 먼저 [① 시트 세팅]을 실행하세요.'); return; }
-  s.getRange(2, 3).setValue('← 일수 지정(자동/28~31)').setFontWeight('bold');
+  // 월(B3) 드롭다운(1~12)
+  var monthRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'], true).build();
+  s.getRange(3, 2).setDataValidation(monthRule);
+  // 일수(C3) 콤보 + 현재 연/월로 자동 채움
+  s.getRange(2, 3).setValue('← 일수(월 선택 시 자동)').setFontWeight('bold');
   var dayRule = SpreadsheetApp.newDataValidation()
     .requireValueInList(['자동', '28', '29', '30', '31'], true).build();
   s.getRange(3, 3).setDataValidation(dayRule);
-  if (!s.getRange(3, 3).getValue()) s.getRange(3, 3).setValue('자동');
+  syncDaysCell(s);
+  // 전월 마지막날 듀티 헤더로 갱신 (기존 '전월 나이트(일)' → 의미 변경)
+  s.getRange(NURSE_START_ROW, 5).setValue('전월 마지막날 듀티(D/E/N/O)');
   SpreadsheetApp.getActiveSpreadsheet().toast(
-    '설정 시트 C3에 일수 콤보를 추가했어요. 30/31을 직접 고른 뒤 [② 자동 배정]을 누르세요.', '듀티표', 7);
+    '월(B3) 콤보 추가 — 월을 고르면 일수(C3)가 자동 반영됩니다. 명단 5열은 "전월 마지막날 듀티(D/E/N/O)"로 바뀌었어요.', '듀티표', 8);
 }
 
 /* [진단] 31일 열이 안 보이는 원인 파악용 — 핵심 값을 알림창으로 표시 */
@@ -138,15 +167,21 @@ function setupSheets() {
   s.getRange(2, 1, rows.length, 2).setValues(rows);
   s.getRange(2, 1, rows.length, 1).setFontWeight('bold');
 
-  // 일수 직접지정 콤보 (C3): '자동'=월로 계산 / 28~31=강제
-  s.getRange(2, 3).setValue('← 일수 지정(자동/28~31)').setFontWeight('bold');
+  // 월(B3) 드롭다운(1~12) — 월을 고르면 onEdit가 일수(C3)를 자동 갱신
+  var monthRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'], true).build();
+  s.getRange(3, 2).setDataValidation(monthRule);
+
+  // 일수(C3): 연/월로 자동 계산해 채움 (이후 월 변경 시 onEdit가 갱신). 필요하면 수동으로 다른 값 선택 가능.
+  s.getRange(2, 3).setValue('← 일수(월 선택 시 자동)').setFontWeight('bold');
   var dayRule = SpreadsheetApp.newDataValidation()
     .requireValueInList(['자동', '28', '29', '30', '31'], true).build();
-  s.getRange(3, 3).setDataValidation(dayRule).setValue('자동');
+  s.getRange(3, 3).setDataValidation(dayRule);
+  syncDaysCell(s);
 
   // 간호사 목록 헤더
   s.getRange(NURSE_START_ROW - 1, 1).setValue('■ 간호사 목록 (역할: 차지 / 액팅)').setFontWeight('bold');
-  var headers = [['이름', '역할', '요청오프(예: 3,10,21)', '듀티개수(예: D:14/N:5/E:0)', '전월 나이트(일)', '선호 듀티', '강도', '나이트최대(빈칸=3)']];
+  var headers = [['이름', '역할', '요청오프(예: 3,10,21)', '듀티개수(예: D:14/N:5/E:0)', '전월 마지막날 듀티(D/E/N/O)', '선호 듀티', '강도', '나이트최대(빈칸=3)']];
   s.getRange(NURSE_START_ROW, 1, 1, 8).setValues(headers)
     .setFontWeight('bold').setBackground(COLORS.HEADER).setFontColor('#ffffff');
 
@@ -242,8 +277,17 @@ function readSettings() {
     var name = (vals[i][0] || '').toString().trim();
     if (!name) continue;
     var role = (vals[i][1] || '액팅').toString().trim();
-    var prevNightDays = Number(vals[i][4]) || 0;
+    var prevLastDuty = (vals[i][4] || '').toString().trim().toUpperCase(); // 전월 마지막날 듀티(D/E/N/O)
+    if (['D', 'E', 'N', 'O'].indexOf(prevLastDuty) < 0) prevLastDuty = '';
     var reqOff = parseReqOff(vals[i][2]);
+    // 전월 마지막날이 나이트면 → 이번달 시작에 나이트 후 오프를 요청오프로 영구 고정(1~offAfterNight일).
+    //   bdyOff에 따로 표시해 D-O-N 앵커 계산에서는 제외(경계 오프가 새 나이트를 유발하지 않도록).
+    var bdyOff = null;
+    if (prevLastDuty === 'N') {
+      var offN0 = Math.max(1, cfg.offAfterNight || 2);
+      bdyOff = {};
+      for (var pk0 = 1; pk0 <= offN0; pk0++) { reqOff[pk0] = true; bdyOff[pk0] = true; }
+    }
     var nMax = parseInt(vals[i][7], 10); // 나이트 최대연속 (빈칸/이상 → 기본 nightLen)
     if (!(nMax >= 1)) nMax = cfg.nightLen;
     nMax = Math.min(nMax, cfg.nightLen); // 전역 한도(3) 초과는 불가
@@ -252,8 +296,8 @@ function readSettings() {
       charge: role === '차지',
       reqOff: reqOff,
       dutyCount: parseDutyCount(vals[i][3]), // 듀티 개수 목표: {D:14, N:5, E:0} 또는 null
-      prevNightDays: prevNightDays,
-      prevBlocks: Math.round(prevNightDays / (cfg.nightLen || 3)),
+      prevLastDuty: prevLastDuty, // 전월 마지막날 듀티 → 이번달 1일차 경계 제약(금지패턴·나이트 후 오프)
+      bdyOff: bdyOff,             // 경계 오프(나이트 후) — 앵커 계산 제외용
       prefShift: parsePref(vals[i][5]), // 선호 듀티 (소프트): '' / 'D' / 'E' / 'N'
       prefStrength: parsePrefStrength(vals[i][6]), // 강도: 1(약간)/2(보통)/3(강하게)
       nightMaxLen: nMax // 나이트 한 번에 최대 연속 일수 (편혜경·박수진=2)
@@ -517,8 +561,74 @@ function applyShiftColors(sheet, r0, c0, nN, nd) {
   sheet.setConditionalFormatRules(rules);
 }
 
+/* 자동배정 진입 시: (1) 월이 전진했으면(현재 듀티표=목표월-1) 현재 듀티표를 '전월 듀티표'로 스냅샷,
+   (2) '전월 듀티표'의 마지막날 듀티를 이름별로 읽어 설정 '전월 마지막날 듀티'(5열)에 자동 기입.
+   → readSettings가 이 값을 읽어 1일차를 전월 마지막날과 규칙대로 연결(N→오프, E→D금지). */
+function syncPrevMonthDuty() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var setS = ss.getSheetByName(SETTINGS_SHEET);
+  if (!setS) return;
+  var tgtYear = parseInt(setS.getRange(2, 2).getValue(), 10);
+  var tgtMonth = parseInt(setS.getRange(3, 2).getValue(), 10);
+  if (!(tgtMonth >= 1 && tgtMonth <= 12)) return;
+
+  // (1) 월 전진 감지 → 현재 듀티표(=직전월)를 전월 듀티표로 스냅샷
+  var duty = ss.getSheetByName(DUTY_SHEET);
+  if (duty) {
+    var m = (duty.getRange(1, 1).getValue() || '').toString().match(/(\d+)\s*년\s*(\d+)\s*월/);
+    if (m) {
+      var curY = parseInt(m[1], 10), curM = parseInt(m[2], 10);
+      var prevY = (tgtMonth === 1) ? tgtYear - 1 : tgtYear;
+      var prevM = (tgtMonth === 1) ? 12 : tgtMonth - 1;
+      if (curY === prevY && curM === prevM) {           // 현재 표가 딱 직전월일 때만 스냅샷(재실행 안전)
+        var old = ss.getSheetByName(PREV_DUTY_SHEET);
+        if (old) ss.deleteSheet(old);
+        duty.copyTo(ss).setName(PREV_DUTY_SHEET);
+      }
+    }
+  }
+
+  // (2) 전월 듀티표 마지막날 듀티 → 설정 5열 자동 기입
+  var prevS = ss.getSheetByName(PREV_DUTY_SHEET);
+  if (!prevS) return;
+  var pm = (prevS.getRange(1, 1).getValue() || '').toString().match(/(\d+)\s*년\s*(\d+)\s*월/);
+  if (!pm) return;
+  var pDays = new Date(parseInt(pm[1], 10), parseInt(pm[2], 10), 0).getDate();
+  var lastCol = 2 + pDays - 1;                          // 마지막 날짜 열 (B=1일)
+
+  var pLast = prevS.getLastRow();
+  if (pLast < DUTY_DATA_START_ROW) return;
+  var pn = pLast - DUTY_DATA_START_ROW + 1;
+  var pNames = prevS.getRange(DUTY_DATA_START_ROW, 1, pn, 1).getValues();
+  var pLastDay = prevS.getRange(DUTY_DATA_START_ROW, lastCol, pn, 1).getValues();
+  var lastMap = {};
+  for (var r = 0; r < pn; r++) {
+    var lbl = (pNames[r][0] || '').toString().trim();
+    if (!lbl) continue;
+    if (lbl.indexOf('합') >= 0 || lbl.indexOf('부족') >= 0) break; // 합계 행에서 종료
+    var nm = lbl.replace(/\s*\(.*\)\s*$/, '').trim();   // "이름 (차지)" → "이름"
+    var v = (pLastDay[r][0] || '').toString().trim().toUpperCase();
+    lastMap[nm] = (['D', 'E', 'N', 'O'].indexOf(v) >= 0) ? v : ''; // S/빈칸은 경계 제약 없음
+  }
+
+  // 설정 명단(1열) 이름 매칭 → 5열 기입(자동 덮어쓰기). 전월에 없는 이름은 기존값 유지.
+  var sLast = setS.getLastRow(), nRows = sLast - NURSE_START_ROW;
+  if (nRows <= 0) return;
+  var sNames = setS.getRange(NURSE_START_ROW + 1, 1, nRows, 1).getValues();
+  var col5 = setS.getRange(NURSE_START_ROW + 1, 5, nRows, 1).getValues();
+  var touched = false;
+  for (var sr = 0; sr < nRows; sr++) {
+    var sname = (sNames[sr][0] || '').toString().trim();
+    if (!sname || !lastMap.hasOwnProperty(sname)) continue;
+    col5[sr][0] = lastMap[sname];
+    touched = true;
+  }
+  if (touched) setS.getRange(NURSE_START_ROW + 1, 5, nRows, 1).setValues(col5);
+}
+
 /* ===================== 자동 배정 ===================== */
 function generateDuty() {
+  syncPrevMonthDuty(); // 전월 듀티표 스냅샷 + 전월 마지막날 듀티 자동 기입 (readSettings 이전)
   var cfg = readSettings();
   if (cfg.nurses.length === 0) {
     SpreadsheetApp.getUi().alert('간호사 목록이 비어있습니다. [설정] 시트를 확인하세요.');
@@ -731,6 +841,9 @@ function tryBuild(cfg, rng) {
       var oi = parseInt(od, 10);
       if (oi >= 1 && oi <= nd && !sched[i2][oi]) sched[i2][oi] = SHIFT.O;
     }
+    // 전월 마지막날 듀티를 day 0(가상)에 심어 1일차 경계 제약(금지패턴 N→D/E, E→D)을
+    //   repairHardViolations가 잡게 한다. (나이트 후 오프는 readSettings에서 reqOff로 영구 고정)
+    if (nu.prevLastDuty) sched[i2][0] = nu.prevLastDuty;
     // 표에 직접 입력해둔 칸(preset)도 고정
     if (cfg.preset && cfg.preset[i2]) {
       for (var pd in cfg.preset[i2]) {
@@ -752,7 +865,13 @@ function tryBuild(cfg, rng) {
   cfg.forcedNight = [];
   cfg.anchorNext = []; // 첫 리퀘스트 오프 "다음날" (나이트 앵커)
   for (var fi = 0; fi < N; fi++) {
-    var firstOff = minDayKey(cfg.nurses[fi].reqOff);
+    // 경계 오프(전월 나이트 후 오프)는 앵커 대상이 아님 → 실제 요청오프 중 최소일만 사용
+    var firstOff = 0, bdy = cfg.nurses[fi].bdyOff;
+    for (var rok in cfg.nurses[fi].reqOff) {
+      var rod = parseInt(rok, 10);
+      if (bdy && bdy[rod]) continue;
+      if (rod >= 1 && (firstOff === 0 || rod < firstOff)) firstOff = rod;
+    }
     if (cfg.preset && cfg.preset[fi]) { // 표에 직접 친 O(수기 리퀘스트)도 포함
       for (var pok in cfg.preset[fi]) {
         if (cfg.preset[fi][pok] !== 'O') continue;
@@ -893,8 +1012,8 @@ function repairHardViolations(cfg, sched) {
   for (var i = 0; i < N; i++) {
     for (var pass = 0; pass < 5; pass++) {
       var changed = false;
-      // N 다음날 D/E, E 다음날 D → 뒷 칸(원인) 제거
-      for (var d = 2; d <= nd; d++) {
+      // N 다음날 D/E, E 다음날 D → 뒷 칸(원인) 제거. d=1은 전월 마지막날(sched[i][0])과 비교.
+      for (var d = 1; d <= nd; d++) {
         var cur = sched[i][d], pv = sched[i][d - 1];
         var bad = ((cur === 'D' || cur === 'E') && pv === 'N') || (cur === 'D' && pv === 'E');
         if (bad && cur !== 'O' && !isLocked(cfg, i, d)) { sched[i][d] = 'O'; changed = true; }
@@ -1516,6 +1635,12 @@ function allocByWeight(weights, total) {
   return floors;
 }
 
+/* 나이트 슬롯 배정용 역할 — 박지연은 차지 자격이나 나이트는 '보조(액팅)'로만 배정한다.
+   (수정사항 7.21 ① : 항상 선배 차지와 함께 근무 → 나이트 5개 보조. 듀티표엔 차지/보조
+    라벨이 표시되지 않으므로 '팀차지 1개'는 수간호사가 원하는 밤을 지정하면 된다.)
+   ※ "매 근무 차지 1명 이상" 커버리지 검사는 그대로 .charge 를 쓴다(박지연도 차지로 카운트). */
+function isNightCharge(nu) { return !!nu && !!nu.charge && nu.name !== '박지연'; }
+
 /* 역할 그룹(idxs)의 1인당 나이트 수 배분 — 듀티 개수(N:n) 지정자는 그 수를 "고정"하고
    나머지 인원이 잔여분을 선호 가중치로 나눠 갖는다. (지정 합이 총량 초과면 비례 축소) */
 function roleNightCounts(cfg, idxs, total) {
@@ -1701,7 +1826,7 @@ function tileNightRoleAligned(nd, idxs, rng, counts, cfg, sched) {
 /* 정확 구성: 차지/액팅 각각 타일링 → 매 밤 차지1+액팅1, 전원 정확히 목표 나이트. 전후 오프 부여 */
 function constructNights(cfg, sched, rng) {
   var nd = cfg.numDays, N = cfg.nurses.length, charges = [], actings = [];
-  for (var i = 0; i < N; i++) cfg.nurses[i].charge ? charges.push(i) : actings.push(i);
+  for (var i = 0; i < N; i++) isNightCharge(cfg.nurses[i]) ? charges.push(i) : actings.push(i);
   if (!charges.length || !actings.length) return false;
   // 1인당 나이트 수: 듀티 개수(N:n) 지정자는 고정, 나머지는 선호 가중치 분배 (역할 합 = nd)
   var cCounts = roleNightCounts(cfg, charges, nd);
@@ -1766,7 +1891,7 @@ function constructNights(cfg, sched, rng) {
     for (var i = 0; i < N; i++) {
       var a = cfg.anchorNext[i];
       if (!a || a > nd) continue;
-      var own = cfg.nurses[i].charge ? co : ao;     // 유효 타일링은 리퀘스트오프 날 N을 안 줌 → own[a]===i면 블록 시작
+      var own = isNightCharge(cfg.nurses[i]) ? co : ao;     // 유효 타일링은 리퀘스트오프 날 N을 안 줌 → own[a]===i면 블록 시작
       if (own[a] === i) sc++;
     }
     return sc;
@@ -1818,7 +1943,7 @@ function assignNightsGreedy(cfg, sched, rng) {
 
   // ── 역할별 나이트 목표 계산 (액팅 6 고정, 차지 = 나머지) ──
   var chargeCount = 0, actingCount = 0;
-  for (var ri = 0; ri < N; ri++) { if (cfg.nurses[ri].charge) chargeCount++; else actingCount++; }
+  for (var ri = 0; ri < N; ri++) { if (isNightCharge(cfg.nurses[ri])) chargeCount++; else actingCount++; }
   var totalSlots = cfg.need.N * nd;                 // 한 달 전체 나이트 자리
   var maxActingTotal = (cfg.need.N - 1) * nd;       // 매 밤 차지 1명 확보 후 액팅이 가질 수 있는 최대
   var idealActing = actingCount * (cfg.actingNightTarget || 6); // 액팅 1인 목표(기본 6)
@@ -1828,13 +1953,13 @@ function assignNightsGreedy(cfg, sched, rng) {
   var actingTarget = actingCount > 0 ? actingTotal / actingCount : 0;
   var chargeTarget = chargeCount > 0 ? chargeTotal / chargeCount : 0;
   var nightTarget = [];
-  for (var ti = 0; ti < N; ti++) nightTarget[ti] = cfg.nurses[ti].charge ? chargeTarget : actingTarget;
+  for (var ti = 0; ti < N; ti++) nightTarget[ti] = isNightCharge(cfg.nurses[ti]) ? chargeTarget : actingTarget;
 
   // ── 역할 그룹 내 목표 재분배: 듀티 개수(N:n) 지정자는 고정, 나머지는 선호 가중치 ──
   //    그룹 합을 그대로 두므로 매 밤 인원/차지 커버리지는 변하지 않음(빈칸 안 생김).
   [true, false].forEach(function (isCharge) {
     var grp = [], sum = 0;
-    for (var gi = 0; gi < N; gi++) if (cfg.nurses[gi].charge === isCharge) { grp.push(gi); sum += nightTarget[gi]; }
+    for (var gi = 0; gi < N; gi++) if (isNightCharge(cfg.nurses[gi]) === isCharge) { grp.push(gi); sum += nightTarget[gi]; }
     if (!grp.length || sum <= 0) return;
     var counts = roleNightCounts(cfg, grp, Math.round(sum));
     for (var ki = 0; ki < grp.length; ki++) nightTarget[grp[ki]] = counts[ki];
@@ -1909,7 +2034,7 @@ function placeNight(cfg, sched, i, start, end) {
 function pickWindowNurse(cfg, sched, start, end, winSize, thisNights, sizeCount, nightTarget, requireCharge, respectTarget, rng) {
   var N = cfg.nurses.length, pool = [];
   for (var i = 0; i < N; i++) {
-    if (requireCharge && !cfg.nurses[i].charge) continue;
+    if (requireCharge && !isNightCharge(cfg.nurses[i])) continue;
     // 사람별 나이트 최대연속 초과 윈도우는 그 사람에게 배정 안 함 (편혜경·박수진=2)
     if (winSize > (cfg.nurses[i].nightMaxLen || cfg.nightLen)) continue;
     // 목표 초과 방지 (폴백 땐 무시)
@@ -1963,9 +2088,7 @@ function pickWindowNurse(cfg, sched, start, end, winSize, thisNights, sizeCount,
     // 1-b) 같은 길이 블록을 두 번 안 하도록 → 2일+3일=5로 딱 떨어지게 (4·6 변동 방지)
     var sa = (sizeCount[a][winSize] || 0), sb = (sizeCount[b][winSize] || 0);
     if (sa !== sb) return sa - sb;
-    // 2) 전월 나이트 적은 사람 → 동률 랜덤 (캐리오버 공평)
-    var na = cfg.nurses[a].prevNightDays || 0, nb = cfg.nurses[b].prevNightDays || 0;
-    if (na !== nb) return na - nb;
+    // 2) 동률 랜덤
     return rng() - 0.5;
   });
   return pool[0];

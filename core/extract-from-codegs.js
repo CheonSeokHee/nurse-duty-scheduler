@@ -19,6 +19,7 @@ const EXCLUDE_FUNCS = new Set([
   'applyShiftColors', 'generateDuty', 'computePreset', 'countPresetCells',
   'presetKeys', 'loadPresetState', 'savePresetState', 'saveLastGenerated',
   'resetPresetLock', 'writeSchedule', 'checkRules', 'clearDutyValues',
+  'syncPrevMonthDuty', 'syncDaysCell', 'onEdit',
 ]);
 // 시트 전용 상수 — 제외 (순수 알고리즘 상수만 유지)
 const EXCLUDE_VARS = new Set([
